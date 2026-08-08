@@ -1,0 +1,20 @@
+# Render.com configuration for NIFTY Trading Bot
+# Free tier: 750 hours/month (a 24/7 worker uses ~744 hours - fits!)
+# Deploys automatically from GitHub repo on push to main
+
+services:
+  - type: worker
+    name: nifty-trading-bot
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python3 cloud_bot.py
+    healthCheckPath: /
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        value: ""            # Set in Render dashboard (never in git)
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        value: ""            # Set in Render dashboard (never in git)
+        sync: false
+    autoDeploy: true
