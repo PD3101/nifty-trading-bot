@@ -1,0 +1,30 @@
+# --- SECURITY: NEVER commit secrets ---
+# config.py is committed (it holds strategy params, no secrets).
+# Secrets come from environment variables (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID).
+*.env
+.env
+*.secret
+*_token*.txt
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Logs & data
+*.log
+*.csv
+data/
+backtest_results/
+
+# Cloud / IDE
+.railway/
+.idea/
+.vscode/
+.DS_Store
+
+# Deployment config templates that may hold local values
+deployment_config.py
