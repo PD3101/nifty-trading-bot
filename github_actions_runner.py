@@ -1,19 +1,16 @@
 """
-One-shot trading bot runner for GitHub Actions.
+One-shot runner for GitHub Actions — fully aligned with the actual strategy.
 
-Runs a SINGLE market check (fetch data -> indicators -> strategy -> alerts) then
-exits. Designed to be lightweight so each scheduled run finishes well under the
-GitHub Actions free-tier minute budget.
+Single market check per run:
+  - 3-minute FUT chart only (no 15m HTF bias)
+  - Pullback to VWMA-20 entry trigger
+  - No-chase filter (4+ consecutive candles)
+  - Stoploss at Supertrend LEVEL of entry candle
+  - 1:2 RR target (hybrid: 50% at 1:1, trail 50% for 1:2)
+  - Max 2-3 trades/day, max 1-2 losses/day then stop
+  - Lunch hours 12:30-2:00 PM avoided
 
-State (open position, error throttle) is persisted to a JSON file between runs
-via the Actions cache, so signals aren't duplicated and positions survive
-between 5-minute runs.
-
-Replaces cloud_bot.py for the GitHub Actions deployment path:
-- Non-repainting: only CLOSED 3m/15m candles are evaluated.
-- Trades only 09:45-15:30 IST, Mon-Fri, no NSE holidays (market_timing.py).
-- One position at a time (config.MAX_POSITIONS = 1).
-- Exits: Supertrend flip, VWAP cross, 30% target, or end of day.
+State (open position, daily counters) persists between runs via GH Actions cache.
 """
 
 import json
@@ -23,6 +20,7 @@ import sys
 from datetime import time as dtime, timedelta
 
 import pandas as pd
+import numpy as np
 import yfinance as yf
 
 import config
@@ -39,10 +37,18 @@ logger = logging.getLogger('gh_runner')
 
 STATE_FILE = os.getenv('STATE_FILE', 'bot_state.json')
 IST = 'Asia/Kolkata'
+
+LUNCH_START = dtime(12, 30)
+LUNCH_END = dtime(14, 0)
 MARKET_CLOSE_TIME = dtime(15, 30)
 
-# Simplified option premium model (mirrors backtester.simulate_option_price)
+
+# ======================================================================
+# Helpers
+# ======================================================================
+
 def simulate_option_price(spot_price, strike, option_type):
+    """Simplified option premium model (mirrors backtester)."""
     if option_type == 'CALL':
         intrinsic = max(0, spot_price - strike)
     else:
@@ -51,8 +57,8 @@ def simulate_option_price(spot_price, strike, option_type):
     return intrinsic + time_value
 
 
-def fetch_resampled(interval, lookback_days=2):
-    """Fetch 1m data and resample to '3m' or '15m'. Returns DataFrame or None."""
+def fetch_3m_data(lookback_days=2):
+    """Fetch 1m data and resample to 3m. Returns DataFrame or None."""
     try:
         ticker = yf.Ticker("^NSEI")
         df = ticker.history(period=f"{lookback_days}d", interval="1m")
@@ -60,195 +66,332 @@ def fetch_resampled(interval, lookback_days=2):
             return None
         df.columns = [c.lower() for c in df.columns]
         df = df[['open', 'high', 'low', 'close', 'volume']]
-        # Normalize index timezone to IST
         if df.index.tz is None:
             df.index = df.index.tz_localize(IST)
         else:
             df.index = df.index.tz_convert(IST)
-        rule = '3min' if interval == '3m' else '15min'
-        resampled = df.resample(rule).agg({
-            'open': 'first',
-            'high': 'max',
-            'low': 'min',
-            'close': 'last',
-            'volume': 'sum'
+        resampled = df.resample('3min').agg({
+            'open': 'first', 'high': 'max', 'low': 'min',
+            'close': 'last', 'volume': 'sum'
         }).dropna()
         return resampled
     except Exception as e:
-        logger.error(f"Fetch failed ({interval}): {e}")
+        logger.error(f"Fetch failed: {e}")
         return None
 
 
 def keep_closed(df, period_minutes, now):
-    """Keep only candles whose period has fully closed by `now` (non-repainting)."""
+    """Keep only candles that have fully closed (non-repainting)."""
     close_at = df.index + pd.Timedelta(minutes=period_minutes)
     return df[close_at <= now]
 
 
 def load_state():
+    default = {
+        'date': '2000-01-01',
+        'open_position': None,
+        'consecutive_failures': 0,
+        'trades_today': 0,
+        'losses_today': 0,
+        'daily_stopped': False,
+    }
     try:
         with open(STATE_FILE) as f:
             state = json.load(f)
             if not isinstance(state, dict):
-                raise ValueError("bad state shape")
+                return default
+            # Ensure all keys present
+            for k, v in default.items():
+                state.setdefault(k, v)
             return state
     except Exception:
-        return {'date': '2000-01-01', 'open_position': None, 'consecutive_failures': 0}
+        return default
 
 
 def save_state(state):
     try:
         with open(STATE_FILE, 'w') as f:
-            json.dump(state, f, indent=2)
+            json.dump(state, f, indent=2, default=str)
     except Exception as e:
         logger.error(f"Failed to save state: {e}")
 
 
+# ======================================================================
+# Exit evaluation
+# ======================================================================
+
 def evaluate_exit(position, row_3m, current_option_price, today, now):
-    """Return exit reason string, or None to keep holding."""
+    """
+    Check exit conditions. Returns (reason, partial_exit) or (None, False).
+
+    partial_exit=True means "book 50% now, keep trailing" (1:1 hit).
+    partial_exit=False + reason means "full exit" (stoploss or 1:2 target).
+    """
+    close = float(row_3m['close'])
+
+    # End of day / previous day
     if position.get('date') != today:
-        return "End of Day (position from a previous day)"
-
+        return "End of Day (position from a previous day)", False
     if now.time() >= MARKET_CLOSE_TIME:
-        return "End of Day (Market Close)"
+        return "End of Day (Market Close)", False
 
-    st_dir = int(row_3m['3m_supertrend_direction'])
-    if st_dir != int(position['entry_supertrend_direction']):
-        return "Supertrend Flip"
+    entry_price = position['entry_price']
+    stoploss_premium = position['stoploss_premium']
+    target_1_1 = position['target_1_1']
+    target_1_2 = position['target_1_2']
+    entry_spot = position['entry_spot']
+    st_level = position['entry_supertrend_level']
+    signal_type = position['type']
 
-    close = row_3m['close']
-    vwap = row_3m['3m_vwap']
-    if position['type'] == 'BUY_CALL' and close < vwap:
-        return "Price Crossed Below VWAP"
-    if position['type'] == 'BUY_PUT' and close > vwap:
-        return "Price Crossed Above VWAP"
+    # --- Stoploss: spot hits Supertrend level of entry candle ---
+    if signal_type == 'BUY_CALL' and close <= st_level:
+        return "Supertrend Stoploss", False
+    if signal_type == 'BUY_PUT' and close >= st_level:
+        return "Supertrend Stoploss", False
 
-    entry_price = position.get('entry_price') or 0
-    if entry_price > 0:
-        pnl_pct = (current_option_price - entry_price) / entry_price * 100
-        if pnl_pct >= 30:
-            return "Target Reached (30%)"
+    # --- Target 1:2 ---
+    if current_option_price >= target_1_2:
+        return "Target 1:2 RR", False
 
-    return None
+    # --- Partial exit at 1:1 (hybrid) ---
+    if config.HYBRID_EXIT_ENABLED and not position.get('partial_booked'):
+        if current_option_price >= target_1_1:
+            return "1:1 RR — Book 50%", True
 
+    return None, False
+
+
+# ======================================================================
+# Telegram alert formatting
+# ======================================================================
+
+def send_entry_alert(notifier, signal, entry_price, stoploss_premium,
+                     target_1_1, target_1_2, now):
+    emoji = "🟢" if signal['type'] == 'BUY_CALL' else "🔴"
+    signal_type = "BUY CALL" if signal['type'] == 'BUY_CALL' else "BUY PUT"
+    risk = entry_price - stoploss_premium if signal['type'] == 'BUY_CALL' \
+        else stoploss_premium - entry_price
+
+    msg = (
+        f"{emoji} <b>{signal_type} — ENTRY</b>\n\n"
+        f"🎯 <b>Strike:</b> {signal['strike_label']} (ITM)\n"
+        f"💰 <b>Entry:</b> ₹{entry_price:.2f}\n"
+        f"📍 <b>Spot:</b> {signal['spot_price']:,.2f}\n"
+        f"🛑 <b>Stoploss:</b> ₹{stoploss_premium:.2f} (Supertrend {signal['supertrend_level']:,.2f})\n"
+        f"📊 <b>Risk:</b> ₹{risk:.2f}\n\n"
+        f"🎯 <b>Target 1:1 →</b> ₹{target_1_1:.2f} (book 50%)\n"
+        f"🎯 <b>Target 1:2 →</b> ₹{target_1_2:.2f} (full exit)\n\n"
+        f"📋 {signal['reason'].replace(' | ', chr(10) + '✓ ')}\n\n"
+        f"🕐 <b>{now.strftime('%I:%M %p')}</b>"
+    )
+    notifier.send_message(msg)
+
+
+def send_partial_exit_alert(notifier, position, current_price, now):
+    pnl = current_price - position['entry_price']
+    pnl_pct = (pnl / position['entry_price'] * 100) if position['entry_price'] else 0
+    msg = (
+        f"📊 <b>PARTIAL EXIT — 50% BOOKED</b>\n\n"
+        f"🎯 <b>Strike:</b> {position['strike_label']}\n"
+        f"💰 <b>Entry:</b> ₹{position['entry_price']:.2f}\n"
+        f"💰 <b>Current:</b> ₹{current_price:.2f} (1:1 RR hit)\n"
+        f"📈 <b>P&L:</b> ₹{pnl:+.2f} ({pnl_pct:+.1f}%)\n\n"
+        f"📝 Trailing remaining 50% for 1:2 target\n"
+        f"🕐 <b>{now.strftime('%I:%M %p')}</b>"
+    )
+    notifier.send_message(msg)
+
+
+def send_full_exit_alert(notifier, position, current_price, reason, now):
+    pnl = current_price - position['entry_price']
+    pnl_pct = (pnl / position['entry_price'] * 100) if position['entry_price'] else 0
+    emoji = "✅" if pnl >= 0 else "❌"
+    msg = (
+        f"{emoji} <b>TRADE CLOSED — {reason}</b>\n\n"
+        f"🎯 <b>Strike:</b> {position['strike_label']}\n"
+        f"💵 <b>Entry:</b> ₹{position['entry_price']:.2f}\n"
+        f"💰 <b>Exit:</b> ₹{current_price:.2f}\n"
+        f"📊 <b>P&L:</b> ₹{pnl:+.2f} ({pnl_pct:+.1f}%)\n"
+        f"📝 <b>Reason:</b> {reason}\n"
+        f"🕐 <b>{now.strftime('%I:%M %p')}</b>"
+    )
+    notifier.send_message(msg)
+
+
+def send_daily_stop_alert(notifier, trades, losses, now):
+    reason = f"Max losses ({losses}/{config.MAX_LOSSES_PER_DAY})" if losses >= config.MAX_LOSSES_PER_DAY \
+        else f"Max trades ({trades}/{config.MAX_TRADES_PER_DAY})"
+    msg = (
+        f"🛑 <b>TRADING STOPPED FOR TODAY</b>\n\n"
+        f"📝 <b>Reason:</b> {reason}\n"
+        f"📊 Trades today: {trades}\n"
+        f"❌ Losses today: {losses}\n\n"
+        f"🕐 <b>{now.strftime('%I:%M %p')}</b>"
+    )
+    notifier.send_message(msg)
+
+
+# ======================================================================
+# Main runner
+# ======================================================================
 
 def main():
     timing = MarketTimingManager()
     now = timing.get_ist_time()
     today = now.strftime('%Y-%m-%d')
 
-    # Optional manual test mode (workflow_dispatch)
+    # --- Test mode (workflow_dispatch) ---
     if os.getenv('GH_ACTION_TEST', '').lower() in ('1', 'true'):
         notifier = TelegramNotifier()
         if notifier.enabled:
-            ok = notifier.send_message(
-                "🧪 <b>GitHub Actions test</b>\n\n"
-                "✅ Bot code runs on GitHub Actions\n"
-                f"🕐 Time: {now.strftime('%Y-%m-%d %H:%M %Z')}\n"
-                "🤖 Ready to trade Monday 09:45 AM IST"
+            notifier.send_message(
+                f"🧪 <b>GitHub Actions test</b>\n\n"
+                f"✅ Strategy-aligned runner works on GitHub\n"
+                f"🕐 {now.strftime('%Y-%m-%d %H:%M %Z')}\n"
+                f"🤖 Ready to trade Monday 09:45 AM IST"
             )
-            print(f"Test message sent: {ok}")
-        else:
-            print("Telegram not configured in this run")
-        sys.exit(0)
+            print("Test message sent: True")
+        return
 
     notifier = TelegramNotifier()
     if not notifier.enabled:
-        logger.error("Telegram not configured - TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID missing")
+        logger.error("Telegram not configured")
         sys.exit(1)
 
     state = load_state()
 
-    # ---- Daily reset + liveness message on trading days ----
+    # --- Daily reset ---
     if state.get('date') != today:
-        state = {'date': today, 'open_position': None, 'consecutive_failures': 0}
+        state = {
+            'date': today,
+            'open_position': None,
+            'consecutive_failures': 0,
+            'trades_today': 0,
+            'losses_today': 0,
+            'daily_stopped': False,
+        }
         if timing.is_weekday(now) and not timing.is_holiday(now):
             notifier.send_message(
                 f"🟢 <b>Bot Online — {today}</b>\n\n"
                 f"🕐 {now.strftime('%I:%M %p %Z')}\n"
-                f"📡 Monitoring NIFTY every 5 min (09:45–15:30 IST)\n"
-                f"📲 Entry/exit alerts will appear here"
+                f"📡 Scanning NIFTY FUT 3m every 5 min (09:45–15:30)\n"
+                f"🎯 Entry: pullback to VWMA-20 + bounce\n"
+                f"🛑 SL: Supertrend level | Target: 1:2 RR\n"
+                f"📊 Max {config.MAX_TRADES_PER_DAY} trades, "
+                f"max {config.MAX_LOSSES_PER_DAY} losses/day\n"
+                f"🍛 Lunch break: 12:30–2:00 PM"
             )
-            logger.info("Daily online message sent")
 
-    # ---- Trade only within market hours and after 09:45 IST ----
+    # --- Trading window checks ---
     if not timing.can_trade_now():
         save_state(state)
-        logger.info("Not in trading window - no-op")
         return
 
-    # ---- Fetch data (1m -> resample) ----
-    df3 = fetch_resampled('3m')
-    df15 = fetch_resampled('15m')
-    if df3 is None or df15 is None:
+    # Lunch hour filter
+    if LUNCH_START <= now.time() <= LUNCH_END:
+        logger.info("Lunch hour — skipping")
+        save_state(state)
+        return
+
+    # Daily stop check
+    if state.get('daily_stopped'):
+        save_state(state)
+        return
+
+    # --- Fetch 3m data only (no 15m) ---
+    df3 = fetch_3m_data()
+    if df3 is None:
         state['consecutive_failures'] = state.get('consecutive_failures', 0) + 1
         if state['consecutive_failures'] == 3:
             notifier.send_message(
                 "⚠️ <b>Data fetch failing</b>\n\n"
-                "The bot could not retrieve NIFTY data on 3 consecutive runs.\n"
-                "Check the GitHub Actions logs for `nifty-trade-bot`."
+                "3 consecutive failures. Check GitHub Actions logs."
             )
         save_state(state)
-        logger.error("Failed to fetch market data")
         return
 
     df3 = keep_closed(df3, 3, now)
-    df15 = keep_closed(df15, 15, now)
-    if len(df3) < 20 or len(df15) < 20:
-        logger.warning(f"Insufficient data: 3m={len(df3)} 15m={len(df15)}")
+    if len(df3) < 20:
+        logger.warning(f"Insufficient 3m data: {len(df3)} candles")
         save_state(state)
         return
 
-    # ---- Indicators + latest closed candles ----
     df3 = Indicators.add_all_indicators(df3, "3m")
-    df15 = Indicators.add_all_indicators(df15, "15m")
     latest3 = df3.iloc[-1]
-    latest15 = df15.iloc[-1]
-
-    strategy = StrategyEngine()
-    htf_bias = strategy.determine_htf_bias(latest15)
+    current_idx = len(df3) - 1
     spot = float(latest3['close'])
+    strategy = StrategyEngine()
 
-    # ---- Exit management for open position ----
+    # --- Open position → check exits ---
     position = state.get('open_position')
     if position:
-        option_type = 'CALL' if position['type'] == 'BUY_CALL' else 'PUT'
-        current_price = simulate_option_price(spot, position['strike'], option_type)
-        reason = evaluate_exit(position, latest3, current_price, today, now)
-        if reason:
-            pnl = current_price - position['entry_price']
-            pnl_pct = (pnl / position['entry_price'] * 100) if position['entry_price'] else 0
-            emoji = "✅" if pnl >= 0 else "❌"
-            notifier.send_message(
-                f"{emoji} <b>TRADE CLOSED — {position['type']}</b>\n\n"
-                f"🎯 <b>Strike:</b> {position['strike_label']}\n"
-                f"💵 <b>Entry:</b> ₹{position['entry_price']:.2f}\n"
-                f"💰 <b>Exit:</b> ₹{current_price:.2f}\n"
-                f"📊 <b>P&L:</b> ₹{pnl:,.2f} ({pnl_pct:+.2f}%)\n"
-                f"📝 <b>Reason:</b> {reason}\n"
-                f"🕐 <b>Time:</b> {now.strftime('%I:%M %p')}"
-            )
-            logger.info(f"EXIT ({reason}) | P&L {pnl:+.2f} ({pnl_pct:+.2f}%)")
+        opt_type = 'CALL' if position['type'] == 'BUY_CALL' else 'PUT'
+        current_price = simulate_option_price(spot, position['strike'], opt_type)
+
+        reason, partial = evaluate_exit(position, latest3, current_price, today, now)
+
+        if partial:
+            # Hybrid exit: book 50% at 1:1
+            send_partial_exit_alert(notifier, position, current_price, now)
+            state['open_position']['partial_booked'] = True
+            logger.info(f"PARTIAL EXIT at 1:1 | price={current_price:.2f}")
+
+        elif reason:
+            send_full_exit_alert(notifier, position, current_price, reason, now)
+            is_loss = current_price < position['entry_price']
+            state['trades_today'] = state.get('trades_today', 0) + 1
+            if is_loss:
+                state['losses_today'] = state.get('losses_today', 0) + 1
             state['open_position'] = None
+            logger.info(f"EXIT ({reason}) | P&L {current_price - position['entry_price']:+.2f}")
+
+            # Check if we should stop for the day
+            if (state['trades_today'] >= config.MAX_TRADES_PER_DAY or
+                    state['losses_today'] >= config.MAX_LOSSES_PER_DAY):
+                state['daily_stopped'] = True
+                send_daily_stop_alert(notifier, state['trades_today'],
+                                      state['losses_today'], now)
+                logger.info("Daily limit reached — trading stopped")
+
+    # --- Flat → look for entry ---
     else:
-        # ---- New entry (only when flat; MAX_POSITIONS = 1) ----
-        signal = strategy.generate_signal(latest3, htf_bias, spot_price=spot)
+        signal = strategy.generate_signal(latest3, df3, current_idx, spot_price=spot)
         if signal:
-            option_type = 'CALL' if signal['type'] == 'BUY_CALL' else 'PUT'
-            entry_price = simulate_option_price(spot, signal['recommended_strike'], option_type)
+            opt_type = 'CALL' if signal['type'] == 'BUY_CALL' else 'PUT'
+            entry_price = simulate_option_price(spot, signal['recommended_strike'], opt_type)
+            st_level = signal['supertrend_level']
+
+            # Compute stoploss and targets
+            sl_premium = simulate_option_price(st_level, signal['recommended_strike'], opt_type)
+            risk = abs(entry_price - sl_premium)
+            if risk <= 0:
+                logger.warning("Risk is zero — skipping entry")
+                save_state(state)
+                return
+            target_1_1 = entry_price + risk   # 1:1 RR
+            target_1_2 = entry_price + 2 * risk  # 1:2 RR
+
             state['open_position'] = {
                 'date': today,
                 'type': signal['type'],
                 'strike': signal['recommended_strike'],
                 'strike_label': signal['strike_label'],
                 'entry_price': entry_price,
+                'entry_spot': spot,
+                'entry_supertrend_level': st_level,
                 'entry_time': str(latest3.name),
-                'entry_supertrend_direction': int(signal['indicators']['supertrend_direction']),
+                'stoploss_premium': sl_premium,
+                'target_1_1': target_1_1,
+                'target_1_2': target_1_2,
+                'partial_booked': False,
                 'confidence': signal.get('confidence'),
             }
-            notifier.send_signal(signal)
+
+            send_entry_alert(notifier, signal, entry_price, sl_premium,
+                             target_1_1, target_1_2, now)
             logger.info(f"ENTRY: {signal['type']} {signal['strike_label']} "
-                        f"@ ₹{entry_price:.2f} (spot {spot:,.2f})")
+                        f"@ ₹{entry_price:.2f} | SL ₹{sl_premium:.2f} "
+                        f"| T1 ₹{target_1_1:.2f} | T2 ₹{target_1_2:.2f}")
 
     state['consecutive_failures'] = 0
     save_state(state)

@@ -1,185 +1,123 @@
 """
-Configuration file for NIFTY Options Backtesting System
-All strategy parameters are defined here
+Configuration file — NIFTY Options Buying Strategy
+
+Aligned with the user's actual strategy (Aug 2026):
+  - Chart: NIFTY FUT, 3-minute
+  - Indicators: VWAP + VWMA-20 + Supertrend (all on FUT 3m chart)
+  - No 15-minute HTF bias — all rules on the 3-minute chart
+  - Entry: pullback to VWMA-20, bounce/rejection
+  - Exit: Supertrend level stoploss, 1:2 RR target
+  - Risk: max 2-3 trades/day, max 1-2 losses/day then stop
 """
 
 import os
 
 # ============================================================================
-# TELEGRAM CONFIGURATION
+# TELEGRAM
 # ============================================================================
 
-# Telegram credentials are read from ENVIRONMENT VARIABLES (never commit to git).
-# Set locally for testing, and on Railway as env vars for deployment.
-#   export TELEGRAM_BOT_TOKEN="..."
-#   export TELEGRAM_CHAT_ID="..."
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID', '')
 
 # ============================================================================
-# MARKET CONFIGURATION
+# MARKET
 # ============================================================================
 
-# Instruments
-FUTURES_SYMBOL = "^NSEI"  # NIFTY 50 Index (will be used as proxy for futures)
-SPOT_SYMBOL = "^NSEI"     # NIFTY Spot
+FUTURES_SYMBOL = "^NSEI"   # NIFTY 50 Index (proxy for futures)
+SPOT_SYMBOL = "^NSEI"      # NIFTY Spot
 
-# Timeframes
-HIGHER_TIMEFRAME = "15m"   # 15 Minutes
-EXECUTION_TIMEFRAME = "3m" # 3 Minutes
+EXECUTION_TIMEFRAME = "3m"  # All rules run on 3-minute chart
+HIGHER_TIMEFRAME = None     # No 15m HTF bias in this strategy
+
+MARKET_OPEN = "09:15"       # NSE opens
+MARKET_CLOSE = "15:30"      # NSE closes
+TRADING_START = "09:45"     # No trades before this
+LUNCH_START = "12:30"       # Lunch hour — low momentum
+LUNCH_END = "14:00"         # Resume trading after lunch
 
 # ============================================================================
-# INDICATOR PARAMETERS
+# INDICATORS
 # ============================================================================
 
-# VWAP
-VWAP_SESSION = "daily"  # Standard session VWAP
-
-# VWMA (also referred to as VAMA in the strategy)
+VWAP_SESSION = "daily"
 VWMA_LENGTH = 20
-
-# Supertrend
-SUPERTREND_PERIOD = 10      # Default TradingView setting
-SUPERTREND_MULTIPLIER = 3.0 # Default TradingView setting
+SUPERTREND_PERIOD = 10
+SUPERTREND_MULTIPLIER = 3.0
 
 # ============================================================================
-# OPTION STRIKE SELECTION
+# STRIKE SELECTION
 # ============================================================================
 
-# Strike Selection Rules
-ITM_RANGE_MIN = 20  # Minimum points ITM
-ITM_RANGE_MAX = 50  # Maximum points ITM
+STRIKE_INTERVAL = 50          # NIFTY strike interval (50 pts)
+ITM_STRIKES = 1               # Default: 1 strike ITM (50 pts for NIFTY)
+ITM_POINTS = STRIKE_INTERVAL * ITM_STRIKES  # 50 pts ITM
 
-# Preferred Delta Range
-DELTA_MIN = 0.55
-DELTA_MAX = 0.70
-
-# NIFTY Options Strike Interval
-STRIKE_INTERVAL = 50  # NIFTY options are available in 50 point intervals
+# ATM only on high-conviction setups with strong OI support
+# (OI data not yet available — defaults to ITM only)
+ALLOW_ATM_HIGH_CONVICTION = False
 
 # ============================================================================
 # ENTRY RULES
 # ============================================================================
 
-# BUY CALL Entry Conditions (all must be true):
-# 1. Higher Timeframe (15m) is Bullish
-# 2. Price is above VWAP
-# 3. Price is above VWMA(20)
-# 4. Supertrend is Green
-# 5. 3-minute candle CLOSES above all three indicators
+# Pullback trigger: price must have pulled back to VWMA-20 recently
+# before entering. Tolerance: how close the candle low/high must come
+# to VWMA-20 to count as a "pullback" (0.15% ≈ 37 pts on NIFTY ~24500).
+PULLBACK_TOLERANCE = 0.0015   # 0.15% of VWMA-20
+PULLBACK_LOOKBACK = 3         # Check last 3 candles for pullback
 
-# BUY PUT Entry Conditions (all must be true):
-# 1. Higher Timeframe (15m) is Bearish
-# 2. Price is below VWAP
-# 3. Price is below VWMA(20)
-# 4. Supertrend is Red
-# 5. 3-minute candle CLOSES below all three indicators
+# No-chase: don't enter after N consecutive candles in the same direction
+NO_CHASE_CANDLES = 4          # Skip if last 4+ candles all same direction
 
 # ============================================================================
 # EXIT RULES
 # ============================================================================
 
-# Stop Loss Triggers (exit if any occurs):
-STOP_LOSS_TRIGGERS = [
-    "supertrend_flip",           # Supertrend flips color
-    "price_cross_vwap",          # Price closes back across VWAP
-    "swing_violation"            # Recent swing high/low violated
-]
+# Stoploss: Supertrend LEVEL (price value) of the entry candle
+# (not a direction flip — the actual Supertrend line value)
 
-# Target Rules
-PARTIAL_TARGET_PERCENT = 50  # Book 50% at first target (support/resistance)
-TRAIL_REMAINING = True       # Trail remaining position
+# Target: 1:2 Risk-Reward ratio
+RR_RATIO = 2.0                # Risk-Reward multiplier
 
-# Trailing Method (choose one)
-TRAIL_METHOD = "supertrend"  # Options: "supertrend", "swing_high", "swing_low"
+# Hybrid exit (Notes section):
+# Book 50% at 1:1, trail remaining 50% for 1:2+
+HYBRID_EXIT_ENABLED = True
+PARTIAL_BOOK_PERCENT = 50     # Book this % at 1:1
 
 # ============================================================================
 # RISK MANAGEMENT
 # ============================================================================
 
-# Capital Allocation
-CAPITAL_PER_TRADE = 50000    # Amount to risk per trade (INR)
+MAX_POSITIONS = 1
+CAPITAL_PER_TRADE = 50000     # INR per trade
+POSITION_SIZE_LOTS = 1        # 1 lot = 65 qty (NIFTY)
+LOT_SIZE = 65
 
-# Position Sizing
-MAX_POSITIONS = 1            # Maximum concurrent positions
-POSITION_SIZE_LOTS = 1       # Number of lots per trade (1 lot = 50 shares for NIFTY)
-
-# ============================================================================
-# BACKTESTING PARAMETERS
-# ============================================================================
-
-# Historical Data Period
-# Note: Yahoo Finance limits 1-minute data to last 8 days
-BACKTEST_START_DATE = "2026-08-01"  # Start date for backtesting (last 7 days)
-BACKTEST_END_DATE = "2026-08-08"    # End date for backtesting
-
-# Trading Hours (IST)
-MARKET_OPEN = "09:15"
-MARKET_CLOSE = "15:30"
-
-# Option Expiry
-EXPIRY_DAY = 4  # Thursday (0=Monday, 4=Thursday)
+MAX_TRADES_PER_DAY = 3        # Rule 12: max 2-3 trades/day
+MAX_LOSSES_PER_DAY = 2        # Rule 13: max 1-2 losses → STOP
 
 # ============================================================================
-# SIGNAL QUALITY
+# GAP DETECTION
 # ============================================================================
 
-# Confidence Scoring Weights (for future use)
-CONFIDENCE_WEIGHTS = {
-    "htf_alignment": 0.3,
-    "ltf_alignment": 0.3,
-    "candle_strength": 0.2,
-    "volume_confirmation": 0.2
-}
+# Gap-up/gap-down: if today's open differs from yesterday's close by
+# more than this %, the pullback trigger naturally adds patience.
+# (No separate logic needed — the pullback filter handles it.)
+GAP_THRESHOLD = 0.005         # 0.5% — informational only
 
 # ============================================================================
-# OUTPUT CONFIGURATION
+# BACKTESTING
 # ============================================================================
 
-# Signal Display Format
-SHOW_CONFIDENCE = True
-SHOW_SPOT_PRICE = True
-SHOW_RECOMMENDED_STRIKE = True
-SHOW_HTF_BIAS = True
-SHOW_REASON = True
-
-# Alert Configuration
-ENABLE_ALERTS = True
-ALERT_FORMAT = "json"  # Options: "json", "text"
-
-# ============================================================================
-# EXTENSIBILITY PLACEHOLDERS
-# ============================================================================
-
-# Future Feature Flags (not yet implemented)
-ENABLE_VOLUME_FILTER = False
-ENABLE_ATR_FILTER = False
-ENABLE_MOMENTUM_FILTER = False
-ENABLE_MARKET_STRUCTURE = False
-ENABLE_LIQUIDITY_FILTER = False
-ENABLE_OPEN_INTEREST = False
-ENABLE_OPTION_CHAIN = False
-ENABLE_AI_SCORING = False
-ENABLE_BROKER_API = False
-ENABLE_AUTO_TRADING = False
-ENABLE_TRADE_JOURNAL = False
-
-# Volume Filter (when enabled)
-VOLUME_FILTER_MULTIPLIER = 1.5  # Minimum volume vs average
-
-# ATR Filter (when enabled)
-ATR_PERIOD = 14
-ATR_THRESHOLD = 1.0
+BACKTEST_START_DATE = "2026-08-01"
+BACKTEST_END_DATE = "2026-08-08"
+EXPIRY_DAY = 4                # Thursday
 
 # ============================================================================
 # SYSTEM RULES (NON-NEGOTIABLE)
 # ============================================================================
 
-# Never repaint
-# Never use future candles
-# Never use lookahead
-# Never generate signals before candle close
-# Only closed candles should be evaluated
-# Generate deterministic signals
-
-STRICT_MODE = True  # Enforce all system rules
+# Only closed candles evaluated (non-repainting)
+# No future data, no lookahead
+# Only 1 position at a time
+STRICT_MODE = True

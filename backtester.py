@@ -1,8 +1,11 @@
 """
-Backtesting Engine
-Simulates option trades based on strategy signals
-Manages entries, exits, stop losses, and targets
-Calculates performance metrics
+Backtesting Engine — aligned with actual strategy
+
+- 3-minute chart only (no 15m HTF bias)
+- Pullback to VWMA-20 trigger + no-chase filter
+- Stoploss: Supertrend level of entry candle
+- Target: 1:2 Risk-Reward (hybrid: 50% at 1:1, trail for 1:2)
+- Max 2-3 trades/day, max 1-2 losses/day then stop
 """
 
 import pandas as pd
@@ -15,419 +18,244 @@ from strategy import StrategyEngine
 
 
 class Trade:
-    """
-    Represents a single option trade
-    """
-    def __init__(self, signal, entry_time, entry_price):
+    def __init__(self, signal, entry_time, entry_price, stoploss_premium,
+                 target_1_1, target_1_2):
         self.signal = signal
         self.entry_time = entry_time
         self.entry_price = entry_price
+        self.stoploss_premium = stoploss_premium
+        self.target_1_1 = target_1_1
+        self.target_1_2 = target_1_2
         self.exit_time = None
         self.exit_price = None
         self.exit_reason = None
         self.pnl = 0
         self.pnl_percent = 0
         self.status = 'OPEN'
-        self.peak_profit = 0
-        self.max_drawdown = 0
+        self.partial_booked = False
+        self.partial_pnl = 0
 
-    def close(self, exit_time, exit_price, reason):
-        """Close the trade"""
+    def close(self, exit_time, exit_price, reason, partial=False):
+        if partial:
+            # Book 50% at current price
+            self.partial_pnl = (exit_price - self.entry_price) * 0.5
+            self.partial_booked = True
+            return
+
         self.exit_time = exit_time
         self.exit_price = exit_price
         self.exit_reason = reason
         self.status = 'CLOSED'
+        pnl_full = exit_price - self.entry_price
+        # If partial was booked, remaining 50% P&L
+        pnl_remaining = pnl_full * 0.5
+        self.pnl = self.partial_pnl + pnl_remaining
+        self.pnl_percent = (self.pnl / self.entry_price) * 100 if self.entry_price else 0
 
-        # Calculate P&L
-        if self.signal['type'] == 'BUY_CALL':
-            self.pnl = exit_price - self.entry_price
-        elif self.signal['type'] == 'BUY_PUT':
-            self.pnl = exit_price - self.entry_price
 
-        self.pnl_percent = (self.pnl / self.entry_price) * 100 if self.entry_price > 0 else 0
-
-    def update_metrics(self, current_price):
-        """Update running metrics"""
-        if self.signal['type'] == 'BUY_CALL':
-            unrealized_pnl = current_price - self.entry_price
-        elif self.signal['type'] == 'BUY_PUT':
-            unrealized_pnl = current_price - self.entry_price
-        else:
-            unrealized_pnl = 0
-
-        self.peak_profit = max(self.peak_profit, unrealized_pnl)
-
-        drawdown_from_peak = self.peak_profit - unrealized_pnl
-        self.max_drawdown = max(self.max_drawdown, drawdown_from_peak)
+def simulate_option_price(spot_price, strike, option_type):
+    if option_type == 'CALL':
+        intrinsic = max(0, spot_price - strike)
+    else:
+        intrinsic = max(0, strike - spot_price)
+    time_value = intrinsic * 0.3 if intrinsic > 0 else spot_price * 0.01
+    return intrinsic + time_value
 
 
 class Backtester:
-    """
-    Main backtesting engine
-    """
-
     def __init__(self, start_date=None, end_date=None):
-        """
-        Initialize backtester
-
-        Args:
-            start_date (str): Start date for backtest
-            end_date (str): End date for backtest
-        """
         self.start_date = start_date or config.BACKTEST_START_DATE
         self.end_date = end_date or config.BACKTEST_END_DATE
-
         self.data_fetcher = DataFetcher(self.start_date, self.end_date)
         self.strategy = StrategyEngine()
-
         self.trades = []
         self.open_trade = None
         self.signals_log = []
-
-    def simulate_option_price(self, spot_price, strike, option_type, direction='entry'):
-        """
-        Simulate option price based on spot movement
-
-        This is a simplified simulation. In production, use:
-        - Historical option chain data
-        - Black-Scholes model
-        - Actual market prices
-
-        Args:
-            spot_price (float): Current spot price
-            strike (float): Strike price
-            option_type (str): 'CALL' or 'PUT'
-            direction (str): 'entry' or 'exit'
-
-        Returns:
-            float: Estimated option premium
-        """
-        # Simplified ITM value calculation
-        if option_type == 'CALL':
-            intrinsic = max(0, spot_price - strike)
-        else:  # PUT
-            intrinsic = max(0, strike - spot_price)
-
-        # Add time value (simplified - around 20-40% of intrinsic for ITM)
-        if intrinsic > 0:
-            time_value = intrinsic * 0.3  # 30% time value
-        else:
-            time_value = spot_price * 0.01  # OTM options have some value
-
-        option_price = intrinsic + time_value
-
-        return option_price
-
-    def check_stop_loss(self, trade, current_candle_3m, current_candle_15m):
-        """
-        Check if stop loss conditions are met
-
-        Stop Loss Triggers:
-        1. Supertrend flips
-        2. Price closes back across VWAP
-        3. Recent swing high/low violated
-
-        Args:
-            trade (Trade): Current open trade
-            current_candle_3m (pd.Series): Current 3m candle
-            current_candle_15m (pd.Series): Current 15m candle
-
-        Returns:
-            tuple: (should_exit, reason)
-        """
-        close = current_candle_3m['close']
-        vwap = current_candle_3m['3m_vwap']
-        st_direction = current_candle_3m['3m_supertrend_direction']
-
-        entry_st_direction = trade.signal['indicators']['supertrend_direction']
-
-        # Check 1: Supertrend flip
-        if st_direction != entry_st_direction:
-            return True, "Supertrend Flip"
-
-        # Check 2: Price crosses VWAP (opposite to entry)
-        if trade.signal['type'] == 'BUY_CALL':
-            if close < vwap:
-                return True, "Price Crossed Below VWAP"
-        elif trade.signal['type'] == 'BUY_PUT':
-            if close > vwap:
-                return True, "Price Crossed Above VWAP"
-
-        # Check 3: Swing violation (simplified - using supertrend as proxy)
-        # In production, implement proper swing high/low detection
-
-        return False, None
-
-    def check_target(self, trade, current_price):
-        """
-        Check if target conditions are met
-
-        Args:
-            trade (Trade): Current open trade
-            current_price (float): Current option price
-
-        Returns:
-            tuple: (should_exit, reason)
-        """
-        # Calculate current profit
-        if trade.signal['type'] == 'BUY_CALL':
-            profit = current_price - trade.entry_price
-        elif trade.signal['type'] == 'BUY_PUT':
-            profit = current_price - trade.entry_price
-        else:
-            profit = 0
-
-        profit_percent = (profit / trade.entry_price) * 100 if trade.entry_price > 0 else 0
-
-        # Simple target: 30% profit
-        # In production, use support/resistance levels
-        if profit_percent >= 30:
-            return True, "Target Reached (30%)"
-
-        return False, None
+        self.trades_today = 0
+        self.losses_today = 0
+        self.daily_stopped = False
+        self.current_date = None
 
     def run_backtest(self):
-        """
-        Main backtesting loop
-
-        Returns:
-            dict: Backtest results
-        """
-        print("\n" + "="*80)
+        print("\n" + "=" * 80)
         print("STARTING BACKTEST")
-        print("="*80)
         print(f"Period: {self.start_date} to {self.end_date}")
-        print(f"Capital per trade: ₹{config.CAPITAL_PER_TRADE:,.0f}")
-        print("="*80)
+        print("=" * 80)
 
-        # Fetch and prepare data
         data = self.data_fetcher.prepare_data_for_backtesting()
-
         if data is None:
             print("Error: Could not fetch data")
             return None
 
-        # Add indicators
-        print("\nCalculating indicators...")
         df_3m = Indicators.add_all_indicators(data['futures_3m'], "3m")
-        df_15m = Indicators.add_all_indicators(data['futures_15m'], "15m")
-        spot_df = data['spot']
-
-        # Build a SPOT close series aligned to 3m timestamps.
-        # SPOT is used ONLY for strike selection; strategy runs on futures (df_3m).
+        spot_df = data.get('spot')
         if spot_df is not None and not spot_df.empty:
             spot_close = spot_df['close'].resample('3min').last().reindex(df_3m.index).ffill()
         else:
             spot_close = df_3m['close'].copy()
 
         print(f"3m candles: {len(df_3m)}")
-        print(f"15m candles: {len(df_15m)}")
-
-        # Backtesting loop
-        print("\nRunning backtest...")
+        print("\nRunning backtest...\n")
 
         for i in range(len(df_3m)):
-            current_candle_3m = df_3m.iloc[i]
-            current_time = current_candle_3m.name
+            current_candle = df_3m.iloc[i]
+            current_time = current_candle.name
 
-            # Get corresponding 15m candle
-            df_15m_before = df_15m[df_15m.index <= current_time]
-            if len(df_15m_before) == 0:
+            # Daily reset
+            day = current_time.date() if hasattr(current_time, 'date') else current_time
+            if day != self.current_date:
+                self.current_date = day
+                self.trades_today = 0
+                self.losses_today = 0
+                self.daily_stopped = False
+
+            # Market hours filter
+            if not self._in_market_hours(current_time):
                 continue
 
-            current_candle_15m = df_15m_before.iloc[-1]
+            close = float(current_candle['close'])
 
-            # Determine HTF bias
-            htf_bias = self.strategy.determine_htf_bias(current_candle_15m)
-
-            # Check if we have an open trade
+            # --- Manage open trade ---
             if self.open_trade:
-                # Get current spot and option price
-                current_spot = current_candle_3m['close']
-
-                if self.open_trade.signal['type'] == 'BUY_CALL':
-                    option_type = 'CALL'
-                else:
-                    option_type = 'PUT'
-
-                current_option_price = self.simulate_option_price(
-                    current_spot,
-                    self.open_trade.signal['recommended_strike'],
-                    option_type,
-                    'exit'
+                opt_type = 'CALL' if self.open_trade.signal['type'] == 'BUY_CALL' else 'PUT'
+                current_option_price = simulate_option_price(
+                    close, self.open_trade.signal['recommended_strike'], opt_type
                 )
 
-                # Update trade metrics
-                self.open_trade.update_metrics(current_option_price)
+                # Check stoploss: spot hits Supertrend level
+                st_level = self.open_trade.signal['supertrend_level']
+                exit_reason = None
+                if self.open_trade.signal['type'] == 'BUY_CALL' and close <= st_level:
+                    exit_reason = "Supertrend Stoploss"
+                elif self.open_trade.signal['type'] == 'BUY_PUT' and close >= st_level:
+                    exit_reason = "Supertrend Stoploss"
 
-                # Check stop loss
-                should_exit_sl, sl_reason = self.check_stop_loss(
-                    self.open_trade,
-                    current_candle_3m,
-                    current_candle_15m
-                )
+                # Check target 1:2
+                if not exit_reason and current_option_price >= self.open_trade.target_1_2:
+                    exit_reason = "Target 1:2 RR"
 
-                if should_exit_sl:
-                    self.open_trade.close(current_time, current_option_price, sl_reason)
+                # Hybrid: partial at 1:1
+                if (not exit_reason and config.HYBRID_EXIT_ENABLED
+                        and not self.open_trade.partial_booked
+                        and current_option_price >= self.open_trade.target_1_1):
+                    self.open_trade.close(current_time, current_option_price,
+                                          "1:1 RR", partial=True)
+                    logger.info(f"  PARTIAL 1:1 at {current_time}")
+
+                if exit_reason:
+                    self.open_trade.close(current_time, current_option_price, exit_reason)
+                    is_loss = self.open_trade.pnl < 0
                     self.trades.append(self.open_trade)
+                    self.trades_today += 1
+                    if is_loss:
+                        self.losses_today += 1
                     self.open_trade = None
-                    continue
 
-                # Check target
-                should_exit_target, target_reason = self.check_target(
-                    self.open_trade,
-                    current_option_price
-                )
+                    if (self.trades_today >= config.MAX_TRADES_PER_DAY or
+                            self.losses_today >= config.MAX_LOSSES_PER_DAY):
+                        self.daily_stopped = True
+                continue
 
-                if should_exit_target:
-                    self.open_trade.close(current_time, current_option_price, target_reason)
-                    self.trades.append(self.open_trade)
-                    self.open_trade = None
-                    continue
+            # --- Look for new entry ---
+            if self.daily_stopped:
+                continue
 
-            # No open trade - look for new signal
-            else:
-                # SPOT price for strike selection (strategy signals from futures 3m)
-                spot_price_for_strike = float(spot_close.iloc[i]) if current_time in spot_close.index else float(current_candle_3m['close'])
-                signal = self.strategy.generate_signal(current_candle_3m, htf_bias, spot_price=spot_price_for_strike)
-
-                if signal:
-                    self.signals_log.append(signal)
-
-                    # Enter trade
-                    current_spot = signal['spot_price']
-
-                    if signal['type'] == 'BUY_CALL':
-                        option_type = 'CALL'
-                    else:
-                        option_type = 'PUT'
-
-                    entry_price = self.simulate_option_price(
-                        current_spot,
-                        signal['recommended_strike'],
-                        option_type,
-                        'entry'
-                    )
-
-                    trade = Trade(signal, current_time, entry_price)
-                    self.open_trade = trade
-
-        # Close any open trade at end of backtest
-        if self.open_trade:
-            last_candle = df_3m.iloc[-1]
-            current_spot = last_candle['close']
-
-            if self.open_trade.signal['type'] == 'BUY_CALL':
-                option_type = 'CALL'
-            else:
-                option_type = 'PUT'
-
-            exit_price = self.simulate_option_price(
-                current_spot,
-                self.open_trade.signal['recommended_strike'],
-                option_type,
-                'exit'
+            spot_price = float(spot_close.iloc[i]) if current_time in spot_close.index else close
+            signal = self.strategy.generate_signal(
+                current_candle, df_3m, i, spot_price=spot_price
             )
+            if signal:
+                self.signals_log.append(signal)
+                opt_type = 'CALL' if signal['type'] == 'BUY_CALL' else 'PUT'
+                entry_price = simulate_option_price(
+                    spot_price, signal['recommended_strike'], opt_type
+                )
+                st_level = signal['supertrend_level']
+                sl_premium = simulate_option_price(st_level, signal['recommended_strike'], opt_type)
+                risk = abs(entry_price - sl_premium)
+                if risk <= 0:
+                    continue
+                target_1_1 = entry_price + risk
+                target_1_2 = entry_price + 2 * risk
 
-            self.open_trade.close(last_candle.name, exit_price, "End of Backtest")
+                trade = Trade(signal, current_time, entry_price,
+                              sl_premium, target_1_1, target_1_2)
+                self.open_trade = trade
+
+        # Close any open trade at end
+        if self.open_trade:
+            last = df_3m.iloc[-1]
+            close = float(last['close'])
+            opt_type = 'CALL' if self.open_trade.signal['type'] == 'BUY_CALL' else 'PUT'
+            ep = simulate_option_price(close, self.open_trade.signal['recommended_strike'], opt_type)
+            self.open_trade.close(last.name, ep, "End of Backtest")
             self.trades.append(self.open_trade)
             self.open_trade = None
 
-        # Calculate results
-        results = self.calculate_results()
+        return self.calculate_results()
 
-        return results
+    def _in_market_hours(self, dt):
+        if hasattr(dt, 'tzinfo') and dt.tzinfo is not None:
+            from datetime import timezone, timedelta
+            ist = timezone(timedelta(hours=5, minutes=30))
+            dt = dt.astimezone(ist)
+        t = dt.time() if hasattr(dt, 'time') else None
+        if t is None:
+            return False
+        from datetime import time as dtime
+        market_open = dtime(9, 45)
+        market_close = dtime(15, 30)
+        lunch_start = dtime(12, 30)
+        lunch_end = dtime(14, 0)
+        if market_open <= t <= market_close:
+            if lunch_start <= t <= lunch_end:
+                return False
+            return True
+        return False
 
     def calculate_results(self):
-        """
-        Calculate backtest performance metrics
-
-        Returns:
-            dict: Performance metrics
-        """
         if not self.trades:
-            print("\nNo trades executed during backtest period")
+            print("\nNo trades executed")
             return None
 
-        print(f"\n{'='*80}")
+        print(f"\n{'=' * 80}")
         print("BACKTEST RESULTS")
-        print("="*80)
+        print("=" * 80)
 
-        # Basic metrics
-        total_trades = len(self.trades)
-        winning_trades = [t for t in self.trades if t.pnl > 0]
-        losing_trades = [t for t in self.trades if t.pnl <= 0]
-
-        num_wins = len(winning_trades)
-        num_losses = len(losing_trades)
-
-        win_rate = (num_wins / total_trades * 100) if total_trades > 0 else 0
-
-        # P&L metrics
+        total = len(self.trades)
+        wins = [t for t in self.trades if t.pnl > 0]
+        losses = [t for t in self.trades if t.pnl <= 0]
+        win_rate = len(wins) / total * 100
         total_pnl = sum(t.pnl for t in self.trades)
-        avg_win = np.mean([t.pnl for t in winning_trades]) if winning_trades else 0
-        avg_loss = np.mean([t.pnl for t in losing_trades]) if losing_trades else 0
+        avg_win = np.mean([t.pnl for t in wins]) if wins else 0
+        avg_loss = np.mean([t.pnl for t in losses]) if losses else 0
 
-        # Per trade type
-        call_trades = [t for t in self.trades if t.signal['type'] == 'BUY_CALL']
-        put_trades = [t for t in self.trades if t.signal['type'] == 'BUY_PUT']
+        print(f"Total Trades: {total}")
+        print(f"Winning: {len(wins)} | Losing: {len(losses)}")
+        print(f"Win Rate: {win_rate:.1f}%")
+        print(f"Total P&L: ₹{total_pnl:,.2f}")
+        print(f"Avg Win: ₹{avg_win:,.2f} | Avg Loss: ₹{avg_loss:,.2f}")
+        print("=" * 80)
 
-        call_wins = len([t for t in call_trades if t.pnl > 0])
-        put_wins = len([t for t in put_trades if t.pnl > 0])
-
-        call_win_rate = (call_wins / len(call_trades) * 100) if call_trades else 0
-        put_win_rate = (put_wins / len(put_trades) * 100) if put_trades else 0
-
-        results = {
-            'total_trades': total_trades,
-            'winning_trades': num_wins,
-            'losing_trades': num_losses,
+        return {
+            'total_trades': total,
+            'wins': len(wins),
+            'losses': len(losses),
             'win_rate': win_rate,
             'total_pnl': total_pnl,
             'avg_win': avg_win,
             'avg_loss': avg_loss,
-            'call_trades': len(call_trades),
-            'put_trades': len(put_trades),
-            'call_win_rate': call_win_rate,
-            'put_win_rate': put_win_rate,
             'trades': self.trades,
-            'signals': self.signals_log
+            'signals': self.signals_log,
         }
-
-        # Print summary
-        print(f"\nTotal Trades: {total_trades}")
-        print(f"Winning Trades: {num_wins}")
-        print(f"Losing Trades: {num_losses}")
-        print(f"Win Rate: {win_rate:.2f}%")
-        print(f"\nTotal P&L: ₹{total_pnl:,.2f}")
-        print(f"Average Win: ₹{avg_win:,.2f}")
-        print(f"Average Loss: ₹{avg_loss:,.2f}")
-        print(f"\nCALL Trades: {len(call_trades)} (Win Rate: {call_win_rate:.2f}%)")
-        print(f"PUT Trades: {len(put_trades)} (Win Rate: {put_win_rate:.2f}%)")
-
-        print("\n" + "="*80)
-
-        return results
 
 
 if __name__ == "__main__":
-    # Run backtest with dates from config
-    # Config is set to last 7 days (Yahoo Finance 1m data limit)
-    backtester = Backtester()  # Uses config.BACKTEST_START_DATE and config.BACKTEST_END_DATE
-
-    results = backtester.run_backtest()
-
+    bt = Backtester()
+    results = bt.run_backtest()
     if results and results['trades']:
-        print("\n" + "="*80)
-        print("SAMPLE TRADES")
-        print("="*80)
-
-        for i, trade in enumerate(results['trades'][:5], 1):
-            print(f"\nTrade #{i}")
-            print(f"Type: {trade.signal['type']}")
-            print(f"Entry: {trade.entry_time} @ ₹{trade.entry_price:.2f}")
-            print(f"Exit: {trade.exit_time} @ ₹{trade.exit_price:.2f}")
-            print(f"P&L: ₹{trade.pnl:.2f} ({trade.pnl_percent:.2f}%)")
-            print(f"Reason: {trade.exit_reason}")
-            print(f"Strike: {trade.signal['strike_label']}")
-            print(f"Confidence: {trade.signal['confidence']}%")
+        print("\nSAMPLE TRADES:")
+        for i, t in enumerate(results['trades'][:5], 1):
+            print(f"  #{i} {t.signal['type']} {t.signal['strike_label']} "
+                  f"| Entry ₹{t.entry_price:.2f} → Exit ₹{t.exit_price:.2f} "
+                  f"| P&L ₹{t.pnl:+.2f} ({t.exit_reason})")
