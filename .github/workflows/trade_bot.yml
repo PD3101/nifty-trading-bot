@@ -1,0 +1,64 @@
+name: nifty-trade-bot
+
+# Runs the one-shot bot every 5 minutes during NSE market hours (IST).
+# Times are UTC. IST = UTC + 5:30.
+#   */5 4-9  -> 09:30-15:25 IST  (trading window; no trades before 09:45)
+#   0 10     -> 15:30 IST        (market close / end-of-day exit)
+on:
+  schedule:
+    - cron: '*/5 4-9 * * 1-5'
+    - cron: '0 10 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      test:
+        description: 'Send a test Telegram message and stop'
+        required: false
+        default: false
+        type: boolean
+
+# Never run two checks at once (protects bot_state.json from races).
+concurrency:
+  group: nifty-trade-bot
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install --quiet -r requirements.txt
+
+      # Restore bot state (open position, error throttle) from the previous run.
+      - name: Restore bot state
+        uses: actions/cache/restore@v4
+        with:
+          path: bot_state.json
+          key: nifty-state-latest
+          restore-keys: |
+            nifty-state-
+
+      - name: Run bot check
+        run: python github_actions_runner.py
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GH_ACTION_TEST: ${{ github.event.inputs.test == 'true' }}
+
+      # Persist state for the next run (unique key each run; restore matches by prefix).
+      - name: Save bot state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: bot_state.json
+          key: nifty-state-${{ github.run_id }}
