@@ -167,20 +167,21 @@ def evaluate_exit(position, row_3m, current_option_price, today, now):
 
 def send_entry_alert(notifier, signal, entry_price, stoploss_premium,
                      target_1_1, target_1_2, now):
+    lot = config.LOT_SIZE
     emoji = "🟢" if signal['type'] == 'BUY_CALL' else "🔴"
     signal_type = "BUY CALL" if signal['type'] == 'BUY_CALL' else "BUY PUT"
     risk = entry_price - stoploss_premium if signal['type'] == 'BUY_CALL' \
         else stoploss_premium - entry_price
+    cost = entry_price * lot
 
     msg = (
         f"{emoji} <b>{signal_type} — ENTRY</b>\n\n"
         f"🎯 <b>Strike:</b> {signal['strike_label']} (ITM)\n"
-        f"💰 <b>Entry:</b> ₹{entry_price:.2f}\n"
+        f"💰 <b>LTP:</b> ₹{entry_price:.2f} × {lot} = ₹{cost:,.0f}\n"
         f"📍 <b>Spot:</b> {signal['spot_price']:,.2f}\n"
-        f"🛑 <b>Stoploss:</b> ₹{stoploss_premium:.2f} (Supertrend {signal['supertrend_level']:,.2f})\n"
-        f"📊 <b>Risk:</b> ₹{risk:.2f}\n\n"
-        f"🎯 <b>Target 1:1 →</b> ₹{target_1_1:.2f} (book 50%)\n"
-        f"🎯 <b>Target 1:2 →</b> ₹{target_1_2:.2f} (full exit)\n\n"
+        f"🛑 <b>SL:</b> ₹{stoploss_premium:.2f} (Risk ₹{risk * lot:,.0f})\n\n"
+        f"🎯 <b>Tgt 1:1 →</b> ₹{target_1_1:.2f} (book 50%)\n"
+        f"🎯 <b>Tgt 1:2 →</b> ₹{target_1_2:.2f} (full exit)\n\n"
         f"📋 {signal['reason'].replace(' | ', chr(10) + '✓ ')}\n\n"
         f"🕐 <b>{now.strftime('%I:%M %p')}</b>"
     )
@@ -188,14 +189,16 @@ def send_entry_alert(notifier, signal, entry_price, stoploss_premium,
 
 
 def send_partial_exit_alert(notifier, position, current_price, now):
-    pnl = current_price - position['entry_price']
-    pnl_pct = (pnl / position['entry_price'] * 100) if position['entry_price'] else 0
+    lot = config.LOT_SIZE
+    pnl = (current_price - position['entry_price']) * lot
+    cost = position['entry_price'] * lot
+    pnl_pct = (pnl / cost * 100) if cost else 0
     msg = (
         f"📊 <b>PARTIAL EXIT — 50% BOOKED</b>\n\n"
         f"🎯 <b>Strike:</b> {position['strike_label']}\n"
-        f"💰 <b>Entry:</b> ₹{position['entry_price']:.2f}\n"
-        f"💰 <b>Current:</b> ₹{current_price:.2f} (1:1 RR hit)\n"
-        f"📈 <b>P&L:</b> ₹{pnl:+.2f} ({pnl_pct:+.1f}%)\n\n"
+        f"💰 <b>Entry:</b> ₹{position['entry_price']:.2f} × {lot} = ₹{cost:,.0f}\n"
+        f"💰 <b>Now:</b> ₹{current_price:.2f} (1:1 RR hit)\n"
+        f"📈 <b>P&L (50%):</b> ₹{pnl:+,.0f} ({pnl_pct:+.1f}%)\n\n"
         f"📝 Trailing remaining 50% for 1:2 target\n"
         f"🕐 <b>{now.strftime('%I:%M %p')}</b>"
     )
@@ -203,15 +206,17 @@ def send_partial_exit_alert(notifier, position, current_price, now):
 
 
 def send_full_exit_alert(notifier, position, current_price, reason, now):
-    pnl = current_price - position['entry_price']
-    pnl_pct = (pnl / position['entry_price'] * 100) if position['entry_price'] else 0
+    lot = config.LOT_SIZE
+    pnl = (current_price - position['entry_price']) * lot
+    cost = position['entry_price'] * lot
+    pnl_pct = (pnl / cost * 100) if cost else 0
     emoji = "✅" if pnl >= 0 else "❌"
     msg = (
         f"{emoji} <b>TRADE CLOSED — {reason}</b>\n\n"
         f"🎯 <b>Strike:</b> {position['strike_label']}\n"
-        f"💵 <b>Entry:</b> ₹{position['entry_price']:.2f}\n"
-        f"💰 <b>Exit:</b> ₹{current_price:.2f}\n"
-        f"📊 <b>P&L:</b> ₹{pnl:+.2f} ({pnl_pct:+.1f}%)\n"
+        f"💵 <b>Entry:</b> ₹{position['entry_price']:.2f} × {lot} = ₹{cost:,.0f}\n"
+        f"💰 <b>Exit:</b> ₹{current_price:.2f} × {lot} = ₹{current_price * lot:,.0f}\n"
+        f"📊 <b>P&L:</b> ₹{pnl:+,.0f} ({pnl_pct:+.1f}%)\n"
         f"📝 <b>Reason:</b> {reason}\n"
         f"🕐 <b>{now.strftime('%I:%M %p')}</b>"
     )

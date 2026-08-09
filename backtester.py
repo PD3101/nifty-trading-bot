@@ -36,9 +36,10 @@ class Trade:
         self.partial_pnl = 0
 
     def close(self, exit_time, exit_price, reason, partial=False):
+        lot = config.LOT_SIZE  # 65 for NIFTY
         if partial:
             # Book 50% at current price
-            self.partial_pnl = (exit_price - self.entry_price) * 0.5
+            self.partial_pnl = (exit_price - self.entry_price) * 0.5 * lot
             self.partial_booked = True
             return
 
@@ -46,11 +47,11 @@ class Trade:
         self.exit_price = exit_price
         self.exit_reason = reason
         self.status = 'CLOSED'
-        pnl_full = exit_price - self.entry_price
+        pnl_full = (exit_price - self.entry_price) * lot
         # If partial was booked, remaining 50% P&L
         pnl_remaining = pnl_full * 0.5
         self.pnl = self.partial_pnl + pnl_remaining
-        self.pnl_percent = (self.pnl / self.entry_price) * 100 if self.entry_price else 0
+        self.pnl_percent = (self.pnl / (self.entry_price * lot)) * 100 if self.entry_price else 0
 
 
 def simulate_option_price(spot_price, strike, option_type):
