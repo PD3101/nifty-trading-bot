@@ -1,7 +1,11 @@
-# Core bot dependencies (cloud_bot.py)
+# Core bot dependencies
 pandas>=2.2.0
 numpy>=1.26.0
 yfinance>=0.2.40
 requests>=2.32.0
 schedule>=1.2.0
-pytz>=2024.1  # market_timing.py / timezone handling
+pytz>=2024.1
+
+# Dashboard dependencies (Streamlit Cloud)
+streamlit>=1.30.0
+plotly>=5.18.0
