@@ -6,9 +6,10 @@ requests>=2.32.0
 schedule>=1.2.0
 pytz>=2024.1
 
-# Kite Connect (NIFTY futures data)
+# Kite Connect (NIFTY futures data + auto-login)
 kiteconnect>=4.2.0
 pyotp>=2.9.0
+playwright>=1.40.0
 
 # Dashboard dependencies (Streamlit Cloud)
 streamlit>=1.30.0
