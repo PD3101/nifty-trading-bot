@@ -37,7 +37,9 @@ jobs:
           cache: 'pip'
 
       - name: Install dependencies
-        run: pip install --quiet -r requirements.txt
+        run: |
+          pip install --quiet -r requirements.txt
+          python -m playwright install chromium --with-deps
 
       # Restore bot state (open position, error throttle) from the previous run.
       - name: Restore bot state
@@ -53,6 +55,12 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          KITE_API_KEY: ${{ secrets.KITE_API_KEY }}
+          KITE_API_SECRET: ${{ secrets.KITE_API_SECRET }}
+          KITE_ACCESS_TOKEN: ${{ secrets.KITE_ACCESS_TOKEN }}
+          KITE_CLIENT_ID: ${{ secrets.KITE_CLIENT_ID }}
+          KITE_PASSWORD: ${{ secrets.KITE_PASSWORD }}
+          KITE_TOTP_SECRET: ${{ secrets.KITE_TOTP_SECRET }}
           GH_ACTION_TEST: ${{ github.event.inputs.test == 'true' }}
 
       # Persist state for the next run (unique key each run; restore matches by prefix).
