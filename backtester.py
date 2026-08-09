@@ -140,7 +140,7 @@ class Backtester:
                         and current_option_price >= self.open_trade.target_1_1):
                     self.open_trade.close(current_time, current_option_price,
                                           "1:1 RR", partial=True)
-                    logger.info(f"  PARTIAL 1:1 at {current_time}")
+                    print(f"  PARTIAL 1:1 at {current_time}")
 
                 if exit_reason:
                     self.open_trade.close(current_time, current_option_price, exit_reason)
@@ -237,6 +237,11 @@ class Backtester:
         print(f"Avg Win: ₹{avg_win:,.2f} | Avg Loss: ₹{avg_loss:,.2f}")
         print("=" * 80)
 
+        call_trades = [t for t in self.trades if t.signal['type'] == 'BUY_CALL']
+        put_trades = [t for t in self.trades if t.signal['type'] == 'BUY_PUT']
+        call_wins = len([t for t in call_trades if t.pnl > 0])
+        put_wins = len([t for t in put_trades if t.pnl > 0])
+
         return {
             'total_trades': total,
             'wins': len(wins),
@@ -245,6 +250,10 @@ class Backtester:
             'total_pnl': total_pnl,
             'avg_win': avg_win,
             'avg_loss': avg_loss,
+            'call_trades': len(call_trades),
+            'put_trades': len(put_trades),
+            'call_win_rate': call_wins / len(call_trades) * 100 if call_trades else 0,
+            'put_win_rate': put_wins / len(put_trades) * 100 if put_trades else 0,
             'trades': self.trades,
             'signals': self.signals_log,
         }

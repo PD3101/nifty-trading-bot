@@ -420,11 +420,13 @@ def main():
             'Spot Price': t.signal['spot_price'],
             'Entry Price': t.entry_price,
             'Exit Price': t.exit_price,
+            'Stoploss': t.stoploss_premium,
+            'Target 1:1': t.target_1_1,
+            'Target 1:2': t.target_1_2,
             'P&L': t.pnl,
             'P&L %': t.pnl_percent,
             'Exit Reason': t.exit_reason,
             'Confidence': t.signal['confidence'],
-            'HTF Bias': t.signal['htf_bias']
         } for t in trades])
 
         csv = trade_df.to_csv(index=False)
@@ -443,40 +445,28 @@ def main():
         st.header("📖 Strategy Rules")
 
         st.markdown("""
-        ### Higher Timeframe (15 Minutes)
-        - **Bullish Bias:** Price > VWAP AND Price > VWMA(20) AND Supertrend Green
-        - **Bearish Bias:** Price < VWAP AND Price < VWMA(20) AND Supertrend Red
-        - **Mixed:** Any disagreement = NO TRADE
+        ### Chart & Indicators
+        - **Chart:** NIFTY FUT, 3-minute timeframe
+        - **Indicators:** VWAP + VWMA-20 + Supertrend (all on FUT 3m)
 
         ### Entry Rules (3 Minutes)
-        **BUY CALL:**
-        1. HTF is Bullish
-        2. Price above VWAP
-        3. Price above VWMA(20)
-        4. Supertrend Green
-        5. 3m candle closes above all indicators
+        **BUY CALL:** Price ABOVE VWAP, VWMA-20, AND Supertrend (green)
+        - Pullback to VWMA-20 detected, then bounce
+        - Not chasing (4+ consecutive candles already up)
 
-        **BUY PUT:**
-        1. HTF is Bearish
-        2. Price below VWAP
-        3. Price below VWMA(20)
-        4. Supertrend Red
-        5. 3m candle closes below all indicators
+        **BUY PUT:** Price BELOW VWAP, VWMA-20, AND Supertrend (red)
+        - Pullback to VWMA-20 detected, then rejection
+        - Not chasing (4+ consecutive candles already down)
 
         ### Exit Rules
-        **Stop Loss:**
-        - Supertrend flips
-        - Price closes back across VWAP
-        - Recent swing high/low violated
+        **Stop Loss:** Supertrend LEVEL of entry candle
+        **Target:** 1:2 Risk-Reward ratio
+        **Hybrid:** Book 50% at 1:1, trail remaining for 1:2+
 
-        **Target:**
-        - Book partial at support/resistance
-        - Trail remaining with Supertrend
-
-        ### Option Selection
-        - Instrument: NIFTY Weekly Options
-        - Strike: 20-50 points ITM
-        - Preferred Delta: 0.55 to 0.70
+        ### Risk Management
+        - Max 2-3 trades/day | Max 1-2 losses → STOP
+        - Lunch hours 12:30–2:00 PM avoided
+        - Strike: 1 strike ITM (50 pts) from SPOT
         """)
 
 

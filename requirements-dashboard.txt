@@ -1,0 +1,11 @@
+# Dashboard dependencies (for Streamlit Community Cloud)
+# Core bot deps
+pandas>=2.2.0
+numpy>=1.26.0
+yfinance>=0.2.40
+requests>=2.32.0
+pytz>=2024.1
+
+# Dashboard
+streamlit>=1.30.0
+plotly>=5.18.0
