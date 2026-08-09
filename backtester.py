@@ -83,39 +83,26 @@ class Backtester:
         print(f"Period: {self.start_date} to {self.end_date}")
         print("=" * 80)
 
-        # Try Kite Connect first (actual NIFTY futures data)
-        try:
-            from kite_fetcher import fetch_3m_data as kite_fetch
-            from datetime import datetime
-            start = datetime.strptime(self.start_date, "%Y-%m-%d")
-            end = datetime.strptime(self.end_date, "%Y-%m-%d")
-            days = (end - start).days
+        # Kite Connect ONLY — actual NIFTY futures data
+        from kite_fetcher import fetch_3m_data as kite_fetch
+        from datetime import datetime
+        start = datetime.strptime(self.start_date, "%Y-%m-%d")
+        end = datetime.strptime(self.end_date, "%Y-%m-%d")
+        days = (end - start).days
 
-            df_3m = kite_fetch(lookback_days=max(days + 2, 5))
-            if df_3m is not None and len(df_3m) > 20:
-                # Filter to backtest date range
-                df_3m = df_3m[self.start_date:self.end_date]
-                df_3m = Indicators.add_all_indicators(df_3m, "3m")
-                spot_close = df_3m['close'].copy()
-                print(f"Using Kite NIFTY futures data: {len(df_3m)} candles")
-                print(f"Range: {df_3m.index[0]} to {df_3m.index[-1]}")
-            else:
-                raise RuntimeError("Kite returned no data")
-        except Exception as e:
-            print(f"Kite unavailable ({e}), falling back to yfinance spot data")
-            data = self.data_fetcher.prepare_data_for_backtesting()
-            if data is None:
-                print("Error: Could not fetch data")
-                return None
-            df_3m = Indicators.add_all_indicators(data['futures_3m'], "3m")
-            spot_df = data.get('spot')
-            if spot_df is not None and not spot_df.empty:
-                spot_close = spot_df['close'].resample('3min').last().reindex(df_3m.index).ffill()
-            else:
-                spot_close = df_3m['close'].copy()
+        df_3m = kite_fetch(lookback_days=max(days + 2, 5))
+        if df_3m is None or len(df_3m) < 20:
+            print("Error: Kite returned no data")
+            return None
 
-        print(f"Candles: {len(df_3m)}")
-        print("\nRunning backtest...\n")
+        # Filter to backtest date range
+        df_3m = df_3m[self.start_date:self.end_date]
+        df_3m = Indicators.add_all_indicators(df_3m, "3m")
+        spot_close = df_3m['close'].copy()
+        print(f"Using Kite NIFTY futures data: {len(df_3m)} candles")
+        print(f"Range: {df_3m.index[0]} to {df_3m.index[-1]}")
+
+        print(f"\nRunning backtest...\n")
 
         for i in range(len(df_3m)):
             current_candle = df_3m.iloc[i]

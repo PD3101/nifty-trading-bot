@@ -319,23 +319,55 @@ def main():
 
     run_backtest = st.sidebar.button("🚀 Run Backtest", type="primary")
 
-    # Run backtest
-    if run_backtest or 'results' not in st.session_state:
-        with st.spinner("Running backtest..."):
-            backtester = Backtester(
-                start_date=start_date.strftime("%Y-%m-%d"),
-                end_date=end_date.strftime("%Y-%m-%d")
-            )
+    # Load pre-computed backtest results (Kite NIFTY futures data)
+    import os
+    results_file = os.path.join(os.path.dirname(__file__), 'backtest_results.json')
 
-            results = backtester.run_backtest()
+    if 'results' not in st.session_state:
+        if os.path.exists(results_file):
+            import json
+            with open(results_file) as f:
+                data = json.load(f)
 
-            if results:
-                st.session_state.results = results
-                st.session_state.trades = results['trades']
-                st.success("✓ Backtest completed!")
-            else:
-                st.error("✗ Backtest failed. Check data availability.")
-                return
+            # Reconstruct Trade-like objects for the charts
+            from backtester import Trade, simulate_option_price
+            from strategy import StrategyEngine
+
+            trades = []
+            for t in data['trades']:
+                # Create a minimal Trade object for chart compatibility
+                class MockTrade:
+                    pass
+                trade = MockTrade()
+                trade.signal = {
+                    'type': t['type'],
+                    'strike_label': t['strike'],
+                    'spot_price': t['spot_price'],
+                    'confidence': t['confidence'],
+                }
+                trade.entry_time = pd.to_datetime(t['entry_time'])
+                trade.exit_time = pd.to_datetime(t['exit_time']) if t['exit_time'] else None
+                trade.entry_price = t['entry_price']
+                trade.exit_price = t['exit_price']
+                trade.stoploss_premium = t['stoploss_premium']
+                trade.target_1_1 = t['target_1_1']
+                trade.target_1_2 = t['target_1_2']
+                trade.pnl = t['pnl']
+                trade.pnl_percent = t['pnl_percent']
+                trade.exit_reason = t['exit_reason']
+                trade.partial_booked = t.get('partial_booked', False)
+                trades.append(trade)
+
+            # Reconstruct results dict
+            results = data['summary']
+            results['trades'] = trades
+
+            st.session_state.results = results
+            st.session_state.trades = trades
+            st.success(f"✓ Loaded {len(trades)} trades from Kite NIFTY futures data")
+        else:
+            st.error("✗ No backtest results found. Run backtest locally first.")
+            return
 
     # Display results
     if 'results' in st.session_state:

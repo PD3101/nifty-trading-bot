@@ -21,7 +21,6 @@ from datetime import time as dtime, timedelta
 
 import pandas as pd
 import numpy as np
-import yfinance as yf
 
 import config
 from indicators import Indicators
@@ -58,35 +57,9 @@ def simulate_option_price(spot_price, strike, option_type):
 
 
 def fetch_3m_data(lookback_days=5):
-    """Fetch NIFTY futures 3m candles from Kite Connect."""
-    try:
-        from kite_fetcher import fetch_3m_data as kite_fetch
-        df = kite_fetch(lookback_days)
-        if df is not None:
-            return df
-    except Exception as e:
-        logger.warning(f"Kite fetch failed ({e}), falling back to yfinance spot")
-
-    # Fallback: yfinance spot (less accurate — spot not futures)
-    try:
-        ticker = yf.Ticker("^NSEI")
-        df = ticker.history(period=f"{lookback_days}d", interval="1m")
-        if df.empty:
-            return None
-        df.columns = [c.lower() for c in df.columns]
-        df = df[['open', 'high', 'low', 'close', 'volume']]
-        if df.index.tz is None:
-            df.index = df.index.tz_localize(IST)
-        else:
-            df.index = df.index.tz_convert(IST)
-        resampled = df.resample('3min').agg({
-            'open': 'first', 'high': 'max', 'low': 'min',
-            'close': 'last', 'volume': 'sum'
-        }).dropna()
-        return resampled
-    except Exception as e:
-        logger.error(f"All fetch methods failed: {e}")
-        return None
+    """Fetch NIFTY futures 3m candles from Kite Connect ONLY."""
+    from kite_fetcher import fetch_3m_data as kite_fetch
+    return kite_fetch(lookback_days)
 
 
 def keep_closed(df, period_minutes, now):
