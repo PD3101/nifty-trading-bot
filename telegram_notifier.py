@@ -87,7 +87,9 @@ class TelegramNotifier:
         # Format time
         signal_time = signal['timestamp'].strftime("%I:%M %p") if hasattr(signal['timestamp'], 'strftime') else str(signal['timestamp'])
 
-        # Build message
+        # Build message (reason split before f-string: backslashes are not
+        # allowed in f-string expressions on Python <3.12)
+        reason_lines = signal['reason'].replace(' | ', '\n✓ ')
         message = f"""
 {emoji} <b>{signal_type} SIGNAL</b>
 
@@ -96,7 +98,7 @@ class TelegramNotifier:
 📊 <b>Confidence:</b> {signal['confidence']}%
 
 <b>📋 Reason:</b>
-{signal['reason'].replace(' | ', '\n✓ ')}
+{reason_lines}
 
 🕐 <b>Time:</b> {signal_time}
 """
