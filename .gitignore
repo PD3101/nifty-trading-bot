@@ -28,3 +28,4 @@ backtest_results/
 
 # Deployment config templates that may hold local values
 deployment_config.py
+kite_credentials.json

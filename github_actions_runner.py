@@ -57,8 +57,17 @@ def simulate_option_price(spot_price, strike, option_type):
     return intrinsic + time_value
 
 
-def fetch_3m_data(lookback_days=2):
-    """Fetch 1m data and resample to 3m. Returns DataFrame or None."""
+def fetch_3m_data(lookback_days=5):
+    """Fetch NIFTY futures 3m candles from Kite Connect."""
+    try:
+        from kite_fetcher import fetch_3m_data as kite_fetch
+        df = kite_fetch(lookback_days)
+        if df is not None:
+            return df
+    except Exception as e:
+        logger.warning(f"Kite fetch failed ({e}), falling back to yfinance spot")
+
+    # Fallback: yfinance spot (less accurate — spot not futures)
     try:
         ticker = yf.Ticker("^NSEI")
         df = ticker.history(period=f"{lookback_days}d", interval="1m")
@@ -76,7 +85,7 @@ def fetch_3m_data(lookback_days=2):
         }).dropna()
         return resampled
     except Exception as e:
-        logger.error(f"Fetch failed: {e}")
+        logger.error(f"All fetch methods failed: {e}")
         return None
 
 
