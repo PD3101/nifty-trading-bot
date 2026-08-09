@@ -1,6 +1,21 @@
 # 🚀 CLOUD DEPLOYMENT GUIDE
 # Deploy Your NIFTY Trading Bot to Run 24/7 (FREE)
 
+## ✅ ACTIVE DEPLOYMENT (already live, Aug 9 2026): GitHub Actions
+
+The bot now runs on **GitHub Actions — 100% free, no accounts or cards**, using the existing repo `PD3101/nifty-trading-bot`.
+
+- `.github/workflows/trade_bot.yml` runs `github_actions_runner.py` every 5 min during NSE market hours (09:45–15:30 IST, Mon–Fri), plus a 15:30 IST end-of-day run.
+- **Secrets** (repo → Settings → Secrets and variables → Actions): `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`.
+- **Manual test:** Actions tab → `nifty-trade-bot` → Run workflow → set `test` = true → sends a Telegram test message.
+- **Watch runs:** Actions tab, or `gh run list --repo PD3101/nifty-trading-bot --workflow trade_bot.yml`.
+- Open position persists between runs via the Actions cache (`bot_state.json`).
+- Minute budget: ~73 runs/day × ~1 min ≈ 1,600 min/month vs 2,000 free — comfortable, but if it ever gets tight switch to `*/10`.
+
+> ⚠️ **Railway/Render options below are OBSOLETE.** Render free rejects background workers ("only web services allowed for plan") and its free web services sleep after 15 min; Railway costs money. Use GitHub Actions above.
+
+---
+
 ## ✅ What You'll Get
 
 - **24/7 Operation** - Runs in the cloud, not on your laptop
