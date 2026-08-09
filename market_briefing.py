@@ -106,6 +106,28 @@ def fetch_news(limit=6):
     return headlines
 
 
+def compute_gift_nifty():
+    """
+    Approximate GIFT NIFTY = NIFTY spot × (1 + S&P 500 futures overnight change).
+
+    GIFT NIFTY (NSE IFSC futures) is the key overnight sentiment driver for
+    Indian markets. Unfortunately:
+      - Yahoo Finance has no ticker for it
+      - NSE IFSC (nseifsc.com) is DNS-unreachable from this network
+      - investing.com blocks all scraping (HTTP 403)
+
+    This approximation captures the dominant relationship: US futures move
+    overnight is the primary driver of where GIFT NIFTY opens.
+    If a reliable API becomes available, replace this function.
+    """
+    nifty_close, _ = fetch_quote('^NSEI')
+    es_chg = fetch_quote('ES=F')[1]   # S&P 500 futures day-over-day %
+    if nifty_close is not None and es_chg is not None:
+        implied = nifty_close * (1 + es_chg / 100)
+        return implied, es_chg
+    return None, None
+
+
 def build_message():
     timing = MarketTimingManager()
     now = timing.get_ist_time()
@@ -114,14 +136,23 @@ def build_message():
     equities = fetch_markets(EQUITIES)
     futures = fetch_markets(FUTURES)
     commodities = fetch_markets(COMMODITIES)
+    gift_nifty, gift_nifty_chg = compute_gift_nifty()
     news = fetch_news()
 
     parts = [
         "🌅 <b>NIFTY PRE-MARKET BRIEF</b>",
         f"📅 {today_str}\n",
-        "🌍 <b>INTERNATIONAL MARKETS</b>",
-        *equities,
     ]
+
+    # GIFT NIFTY — the most important pre-market indicator for Indian markets
+    if gift_nifty is not None:
+        parts += [
+            "🇮🇳 <b>GIFT NIFTY (implied):</b> "
+            f"{gift_nifty:,.2f} <i>(US futures {gift_nifty_chg:+.2f}%)</i>",
+            "    <i>— computed from NIFTY close + S&P 500 futures overnight move</i>\n",
+        ]
+
+    parts += ["🌍 <b>INTERNATIONAL MARKETS</b>", *equities]
 
     if futures:
         parts += ["", "📈 <b>FUTURES</b>", *futures]
