@@ -111,7 +111,7 @@ GAP_THRESHOLD = 0.005         # 0.5% — informational only
 
 BACKTEST_START_DATE = "2026-08-01"
 BACKTEST_END_DATE = "2026-08-08"
-EXPIRY_DAY = 4                # Thursday
+EXPIRY_DAY = 1                # Tuesday (NIFTY weekly expiry)
 
 # ============================================================================
 # SYSTEM RULES (NON-NEGOTIABLE)
