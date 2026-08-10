@@ -6,6 +6,7 @@ name: nifty-trade-bot
 #   0 10     -> 15:30 IST        (market close / end-of-day exit)
 on:
   schedule:
+    - cron: '55 2 * * 1-5'   # 08:25 IST — pre-market bootstrap (chain takes over)
     - cron: '*/5 4-9 * * 1-5'
     - cron: '0 10 * * 1-5'
   workflow_dispatch:

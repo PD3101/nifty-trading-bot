@@ -4,7 +4,8 @@ name: nifty-market-briefing
 # 30 3 UTC = 09:00 IST, Mon-Fri.
 on:
   schedule:
-    - cron: '30 3 * * 1-5'
+    - cron: '55 2 * * 1-5'   # 08:25 IST — early bootstrap (backup: 09:00 IST cron)
+    - cron: '30 3 * * 1-5'   # 09:00 IST — primary
   workflow_dispatch:
 
 permissions:

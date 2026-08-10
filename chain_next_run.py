@@ -6,9 +6,11 @@ for the next scan in ~5 minutes, bypassing GitHub's unreliable schedule cron.
 
 How it works:
   - Each trade-bot run calls this script at the very end.
-  - If IST is within market hours (09:15–15:30) on a weekday,
-    it POSTs to the GitHub Actions API to trigger the next run.
+  - If IST is within 08:25–15:30 on a weekday, it POSTs to the GitHub
+    Actions API to trigger the next run.
   - The schedule cron (*/5 4-9) stays as a fallback bootstrap only.
+  - Early runs (before 09:15) exit via can_trade_now() but keep the
+    chain alive so the first real scan fires on time.
 """
 
 import json
@@ -26,7 +28,10 @@ logging.basicConfig(
 logger = logging.getLogger('chain')
 
 IST = pytz.timezone('Asia/Kolkata')
-MARKET_OPEN = dtime(9, 15)
+# Chain starts at 08:25 IST (pre-market bootstrap) and runs until market close.
+# Early runs exit via can_trade_now() but keep the chain alive so the first
+# real scan fires on time at 09:15.
+CHAIN_START = dtime(8, 25)
 MARKET_CLOSE = dtime(15, 30)
 
 
@@ -35,7 +40,7 @@ def should_chain():
     now = datetime.now(IST)
     if now.weekday() >= 5:
         return False
-    return MARKET_OPEN <= now.time() <= MARKET_CLOSE
+    return CHAIN_START <= now.time() <= MARKET_CLOSE
 
 
 def chain_next_run():
