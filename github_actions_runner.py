@@ -317,6 +317,8 @@ def main():
                     f"{s['strike_label']} ({stype})\n"
                     f"   Spot: {s['spot']:,.2f} | Confidence: {s.get('confidence', 'N/A')}%"
                 )
+                logger.info(f"SIGNAL: {s['time'][-14:-6]} {s['strike_label']} {stype} "
+                           f"spot={s['spot']:.2f} conf={s.get('confidence', 'N/A')}%")
             msg = "\n".join(lines)
         else:
             msg = f"📊 <b>SCAN — {data_date} — No signals</b>\n\nThe strategy found no entry setups (pullback to VWMA-20 + Supertrend confirmation)."
