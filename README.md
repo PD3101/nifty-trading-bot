@@ -36,18 +36,24 @@ Automated NIFTY options signal generator using Zerodha Kite Connect for real NIF
 ## Architecture
 
 ```
-┌─────────────────┐     ┌──────────────────┐     ┌─────────────┐
-│  Kite Connect   │────▶│  GitHub Actions   │────▶│  Telegram   │
-│  (NIFTY Futures │     │  (every 5 min)    │     │  (alerts)   │
-│   3m candles)   │     │  Auto-login TOTP  │     └─────────────┘
-└─────────────────┘     └──────────────────┘
-                               │
-                        ┌──────▼──────┐
-                        │   Streamlit  │
-                        │   Dashboard  │
-                        │  (backtest)  │
-                        └─────────────┘
+┌──────────────┐
+│ cron-job.org │──── 08:25 IST ────┐ (external trigger, primary)
+└──────────────┘                   │
+                                   ▼
+┌─────────────────┐     ┌──────────────────────┐     ┌─────────────┐
+│  Kite Connect   │────▶│  GitHub Actions       │────▶│  Telegram   │
+│  (NIFTY Futures │     │  (every 5 min chain)  │     │  (alerts)   │
+│   3m candles)   │     │  Auto-login TOTP      │     └─────────────┘
+└─────────────────┘     │  Self-chaining:       │
+                        │  each run triggers     │
+                        │  the next via API      │
+                        └──────────────────────┘
 ```
+
+### Reliability (3 layers)
+1. **cron-job.org** (external, primary) — fires workflow_dispatch at 08:25 IST
+2. **GH Actions schedule crons** (backup) — 08:25 + 09:00 + */5 min
+3. **Self-chain** — once any run fires, chains every 5 min until 15:30 IST
 
 ## Data Source
 
@@ -57,20 +63,47 @@ Automated NIFTY options signal generator using Zerodha Kite Connect for real NIF
 - Auto-selects nearest month contract
 - Token refreshes daily via headless browser + TOTP
 
+## Pre-Market Briefing
+
+Sent twice daily via Telegram:
+- **08:25 AM IST** — Early brief (international markets, GIFT NIFTY, commodities, news)
+- **09:00 AM IST** — Final brief with fresh data
+
+Includes a **Market Trend Prediction** scoring 7 factors:
+| Factor | Weight | Direction |
+|---|---|---|
+| GIFT NIFTY | 30% | Higher = bullish |
+| US Futures (S&P + NASDAQ) | 20% | Higher = bullish |
+| NIFTY 50 prev close | 15% | Higher = bullish |
+| Crude Oil | 10% | Lower = bullish (India import bill) |
+| USD/INR | 10% | Lower = bullish (stronger INR) |
+| Gold | 5% | Lower = bullish (risk-on) |
+| US 10Y yield | 5% | Lower = bullish (risk-on for EMs) |
+
+Output: 🟢 BULLISH / 🔴 BEARISH / 🟡 MIXED with key drivers.
+
 ## Files
 
 | File | Purpose |
 |---|---|
-| `github_actions_runner.py` | Main bot — runs on GitHub Actions every 5 min |
-| `kite_fetcher.py` | Kite Connect data fetcher + auto-login |
+| `github_actions_runner.py` | Main bot — runs on GitHub Actions, scan mode, entry/exit logic |
+| `kite_fetcher.py` | Kite Connect data fetcher + auto-login via TOTP |
+| `chain_next_run.py` | Self-chaining — triggers next GH Actions run via API |
 | `strategy.py` | Entry/exit logic (3m only, pullback trigger, 1:2 RR) |
 | `indicators.py` | VWAP, VWMA-20, Supertrend calculations |
 | `config.py` | All strategy parameters |
 | `backtester.py` | Backtesting engine (uses Kite data) |
 | `dashboard.py` | Streamlit dashboard (loads pre-computed results) |
-| `market_briefing.py` | Pre-market brief (GIFT NIFTY + news + markets) |
+| `market_briefing.py` | Pre-market brief + trend prediction (GIFT NIFTY + news + markets) |
 | `market_timing.py` | Market hours, holidays, lunch break |
 | `telegram_notifier.py` | Telegram alert formatting |
+
+## Workflows
+
+| Workflow | Schedule | Purpose |
+|---|---|---|
+| `nifty-trade-bot` | 08:25 IST + every 5 min | Market scan, entry/exit signals |
+| `nifty-market-briefing` | 08:25 + 09:00 IST | Pre-market brief with trend prediction |
 
 ## Setup
 
@@ -79,6 +112,7 @@ Automated NIFTY options signal generator using Zerodha Kite Connect for real NIF
 - Telegram bot (BotFather)
 - Google Authenticator (for TOTP auto-login)
 - GitHub account
+- cron-job.org account (free, for reliable external trigger)
 
 ### Environment Variables (GitHub Secrets)
 ```
@@ -101,20 +135,21 @@ python backtester.py          # Run backtest
 streamlit run dashboard.py    # Launch dashboard
 ```
 
-## Dashboard
-
-Live at: https://nifty-trading-bot-xxxxx.streamlit.app
-
-Shows backtest results from actual NIFTY futures data (Kite Connect).
-Updated with each code push to GitHub.
+### On-Demand Scan
+Trigger a scan outside market hours via GitHub Actions:
+```bash
+gh workflow run nifty-trade-bot --ref main -f scan_today=true
+```
+Fetches real Kite data and reports all strategy signals for the latest trading day.
 
 ## Telegram Alerts
 
 | Alert | When |
 |---|---|
-| 🌅 Pre-market brief | 9:00 AM IST daily |
-| 🟢 Bot online | 9:30 AM IST daily |
-| 🟢/🔴 Entry | Signal triggered |
+| 🌅 Pre-market brief | 08:25 + 09:00 AM IST daily |
+| 📊 Trend prediction | Included in brief (🟢/🔴/🟡) |
+| 🟢 Bot online | 08:25 AM IST daily |
+| 🟢/🔴 Entry | Signal triggered (live market) |
 | 📊 Partial exit | 1:1 RR hit (book 50%) |
 | ✅/❌ Full exit | 1:2 target or stoploss |
 | 🛑 Daily stop | Max trades/losses reached |
