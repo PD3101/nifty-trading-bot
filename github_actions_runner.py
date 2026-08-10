@@ -277,13 +277,14 @@ def main():
             notifier.send_message("⚠️ <b>Scan failed</b>\n\nCould not fetch Kite data.")
             return
 
-        # Filter to today only
-        today_start = now.replace(hour=9, minute=15, second=0, microsecond=0)
-        today_end = now.replace(hour=15, minute=30, second=0, microsecond=0)
-        df3 = df3[(df3.index >= today_start) & (df3.index <= today_end)]
+        # Filter to the latest trading day in the data (handles post-midnight runs)
+        data_date = df3.index[-1].date()
+        day_start = df3.index[-1].replace(hour=9, minute=15, second=0, microsecond=0)
+        day_end = df3.index[-1].replace(hour=15, minute=30, second=0, microsecond=0)
+        df3 = df3[(df3.index >= day_start) & (df3.index <= day_end)]
 
         if len(df3) < 20:
-            notifier.send_message(f"⚠️ <b>Insufficient data</b>\n\nOnly {len(df3)} candles for today.")
+            notifier.send_message(f"⚠️ <b>Insufficient data</b>\n\nOnly {len(df3)} candles for {data_date}.")
             return
 
         df3 = Indicators.add_all_indicators(df3, "3m")
@@ -307,7 +308,7 @@ def main():
 
         # Build report
         if signals:
-            lines = [f"📊 <b>TODAY'S SCAN — {len(signals)} signal(s) found</b>\n"]
+            lines = [f"📊 <b>SCAN — {data_date} — {len(signals)} signal(s) found</b>\n"]
             for s in signals:
                 emoji = "🟢" if s['type'] == 'BUY_CALL' else "🔴"
                 stype = "CE" if s['type'] == 'BUY_CALL' else "PE"
@@ -318,7 +319,7 @@ def main():
                 )
             msg = "\n".join(lines)
         else:
-            msg = "📊 <b>TODAY'S SCAN — No signals</b>\n\nThe strategy found no entry setups today (pullback to VWMA-20 + Supertrend confirmation)."
+            msg = f"📊 <b>SCAN — {data_date} — No signals</b>\n\nThe strategy found no entry setups (pullback to VWMA-20 + Supertrend confirmation)."
 
         notifier.send_message(msg)
         print(f"Scan complete: {len(signals)} signals")
