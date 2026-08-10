@@ -144,25 +144,25 @@ def _score(change, thresholds):
 
 
 def compute_trend_prediction(gift_chg, sp_fut, nq_fut, nifty_chg,
-                             crude_chg, usdinr_chg, us10y_chg):
+                             crude_chg, usdinr_chg, us10y_chg, gold_chg):
     """
     Score each indicator and return (emoji, label, reasoning).
     Scores range -2 (very bearish) to +2 (very bullish).
     """
     parts = []  # (weight, score, reason)
 
-    # GIFT NIFTY — strongest predictor of NIFTY open (35%)
+    # GIFT NIFTY — strongest predictor of NIFTY open (30%)
     if gift_chg is not None:
         s = _score(gift_chg, (0.1, 0.3))
-        parts.append((0.35, s, f"GIFT NIFTY {gift_chg:+.2f}%"))
+        parts.append((0.30, s, f"GIFT NIFTY {gift_chg:+.2f}%"))
 
-    # US futures avg — overnight risk sentiment (25%)
+    # US futures avg — overnight risk sentiment (20%)
     fut_vals = [x for x in (sp_fut, nq_fut) if x is not None]
     if fut_vals:
         avg = sum(fut_vals) / len(fut_vals)
         s = _score(avg, (0.2, 0.5))
         label = "US futures green" if avg > 0.05 else "US futures red" if avg < -0.05 else "US futures flat"
-        parts.append((0.25, s, label))
+        parts.append((0.20, s, label))
 
     # NIFTY 50 prev close (15%)
     if nifty_chg is not None:
@@ -180,10 +180,22 @@ def compute_trend_prediction(gift_chg, sp_fut, nq_fut, nifty_chg,
         s = -_score(usdinr_chg, (0.05, 0.15))  # inverted: INR up = bad
         parts.append((0.10, s, None))
 
+    # Gold — higher = risk-off = bearish for equities (5%)
+    if gold_chg is not None:
+        s = -_score(gold_chg, (0.2, 0.6))  # inverted: gold up = bad
+        parts.append((0.05, s, None))
+
     # US 10Y yield — lower = risk-on = good for EMs (5%)
     if us10y_chg is not None:
         s = -_score(us10y_chg, (0.5, 1.5))  # inverted: yield up = bad
         parts.append((0.05, s, None))
+
+    # News crude keyword scan (5%)
+    if parts:
+        total_w = sum(w for w, _, _ in parts)
+        # Renormalize weights to sum to 0.95 (leaving 5% for news if present)
+        norm = 0.95 / total_w if total_w > 0 else 1
+        parts = [(w * norm, s, r) for w, s, r in parts]
 
     if not parts:
         return '🟡', 'MIXED', 'Insufficient data'
@@ -220,10 +232,11 @@ def build_message():
     crude_chg = com_raw.get('CL=F', (None, None))[1]
     usdinr_chg = com_raw.get('INR=X', (None, None))[1]
     us10y_chg = com_raw.get('^TNX', (None, None))[1]
+    gold_chg = com_raw.get('GC=F', (None, None))[1]
 
     pred_emoji, pred_label, pred_reason = compute_trend_prediction(
         gift_nifty_chg, sp_fut_chg, nq_fut_chg, nifty_chg,
-        crude_chg, usdinr_chg, us10y_chg,
+        crude_chg, usdinr_chg, us10y_chg, gold_chg,
     )
 
     parts = [
