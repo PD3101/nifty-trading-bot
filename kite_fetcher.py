@@ -171,6 +171,7 @@ def refresh_token(api_key, api_secret):
     import asyncio
     import pyotp
     import re
+    from kiteconnect import KiteConnect
 
     client_id = os.getenv('KITE_CLIENT_ID')
     password = os.getenv('KITE_PASSWORD')

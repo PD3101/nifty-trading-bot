@@ -41,11 +41,15 @@ jobs:
           pip install --quiet -r requirements.txt
           python -m playwright install chromium --with-deps
 
-      # Restore bot state (open position, error throttle) from the previous run.
+      # Restore bot state (open position, error throttle) and the refreshed
+      # Kite access token from the previous run. Persisting kite_credentials.json
+      # avoids re-running the headless login on every single check.
       - name: Restore bot state
         uses: actions/cache/restore@v4
         with:
-          path: bot_state.json
+          path: |
+            bot_state.json
+            kite_credentials.json
           key: nifty-state-latest
           restore-keys: |
             nifty-state-
@@ -68,5 +72,7 @@ jobs:
         if: always()
         uses: actions/cache/save@v4
         with:
-          path: bot_state.json
+          path: |
+            bot_state.json
+            kite_credentials.json
           key: nifty-state-${{ github.run_id }}
