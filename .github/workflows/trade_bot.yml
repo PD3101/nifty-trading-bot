@@ -16,6 +16,11 @@ on:
         required: false
         default: false
         type: boolean
+      scan_today:
+        description: "Scan today's data and report signals (bypasses market hours)"
+        required: false
+        default: false
+        type: boolean
 
 # Never run two checks at once (protects bot_state.json from races).
 concurrency:
@@ -68,6 +73,7 @@ jobs:
           KITE_PASSWORD: ${{ secrets.KITE_PASSWORD }}
           KITE_TOTP_SECRET: ${{ secrets.KITE_TOTP_SECRET }}
           GH_ACTION_TEST: ${{ github.event.inputs.test == 'true' }}
+          SCAN_TODAY: ${{ github.event.inputs.scan_today == 'true' }}
 
       # Persist state for the next run (unique key each run; restore matches by prefix).
       - name: Save bot state

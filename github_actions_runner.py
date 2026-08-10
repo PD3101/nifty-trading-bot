@@ -269,6 +269,61 @@ def main():
                 f"🍛 Lunch break: 12:30–2:00 PM"
             )
 
+    # --- Scan-only mode: fetch today's data and report signals ---
+    if os.getenv('SCAN_TODAY', '').lower() in ('1', 'true'):
+        logger.info("Scan-only mode: fetching today's Kite data...")
+        df3 = fetch_3m_data(lookback_days=2)
+        if df3 is None:
+            notifier.send_message("⚠️ <b>Scan failed</b>\n\nCould not fetch Kite data.")
+            return
+
+        # Filter to today only
+        today_start = now.replace(hour=9, minute=15, second=0, microsecond=0)
+        today_end = now.replace(hour=15, minute=30, second=0, microsecond=0)
+        df3 = df3[(df3.index >= today_start) & (df3.index <= today_end)]
+
+        if len(df3) < 20:
+            notifier.send_message(f"⚠️ <b>Insufficient data</b>\n\nOnly {len(df3)} candles for today.")
+            return
+
+        df3 = Indicators.add_all_indicators(df3, "3m")
+        strategy = StrategyEngine()
+        signals = []
+
+        for i in range(20, len(df3)):
+            row = df3.iloc[i]
+            spot = float(row['close'])
+            sig = strategy.generate_signal(row, df3, i, spot_price=spot)
+            if sig:
+                signals.append({
+                    'time': str(df3.index[i]),
+                    'type': sig['type'],
+                    'strike': sig.get('recommended_strike'),
+                    'strike_label': sig.get('strike_label'),
+                    'spot': spot,
+                    'reason': sig.get('reason', ''),
+                    'confidence': sig.get('confidence'),
+                })
+
+        # Build report
+        if signals:
+            lines = [f"📊 <b>TODAY'S SCAN — {len(signals)} signal(s) found</b>\n"]
+            for s in signals:
+                emoji = "🟢" if s['type'] == 'BUY_CALL' else "🔴"
+                stype = "CE" if s['type'] == 'BUY_CALL' else "PE"
+                lines.append(
+                    f"{emoji} <b>{s['time'][-14:-6]}</b> — "
+                    f"{s['strike_label']} ({stype})\n"
+                    f"   Spot: {s['spot']:,.2f} | Confidence: {s.get('confidence', 'N/A')}%"
+                )
+            msg = "\n".join(lines)
+        else:
+            msg = "📊 <b>TODAY'S SCAN — No signals</b>\n\nThe strategy found no entry setups today (pullback to VWMA-20 + Supertrend confirmation)."
+
+        notifier.send_message(msg)
+        print(f"Scan complete: {len(signals)} signals")
+        return
+
     # --- Trading window checks ---
     if not timing.can_trade_now():
         save_state(state)
