@@ -23,6 +23,7 @@ concurrency:
 
 permissions:
   contents: read
+  actions: write
 
 jobs:
   scan:
@@ -76,3 +77,11 @@ jobs:
             bot_state.json
             kite_credentials.json
           key: nifty-state-${{ github.run_id }}
+
+      # Chain the next 5-minute scan via GitHub API, bypassing the unreliable
+      # schedule cron. The schedule cron stays as a fallback bootstrap only.
+      - name: Chain next scan
+        if: always()
+        run: python chain_next_run.py
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
