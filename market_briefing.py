@@ -59,8 +59,8 @@ def fetch_quote(symbol, days=5):
 
 
 def fetch_markets(tickers):
-    """Return formatted lines for a ticker group; skip symbols that fail."""
-    lines = []
+    """Return (formatted_lines, raw_data_dict); skip symbols that fail."""
+    lines, raw = [], {}
     for label, symbol, emoji in tickers:
         try:
             last, chg = fetch_quote(symbol)
@@ -68,9 +68,10 @@ def fetch_markets(tickers):
                 continue
             chg_str = f"({chg:+.2f}%)" if chg is not None else "(--)"
             lines.append(f"{emoji} <b>{label}:</b> {last:,.2f} {chg_str}")
+            raw[symbol] = (last, chg)
         except Exception:
             continue
-    return lines
+    return lines, raw
 
 
 def fetch_news(limit=6):
@@ -128,16 +129,102 @@ def compute_gift_nifty():
     return None, None
 
 
+def _score(change, thresholds):
+    """Map a change_pct to -2..+2 using (low, high) thresholds."""
+    low, high = thresholds
+    if change > high:
+        return 2
+    if change > low:
+        return 1
+    if change < -high:
+        return -2
+    if change < -low:
+        return -1
+    return 0
+
+
+def compute_trend_prediction(gift_chg, sp_fut, nq_fut, nifty_chg,
+                             crude_chg, usdinr_chg, us10y_chg):
+    """
+    Score each indicator and return (emoji, label, reasoning).
+    Scores range -2 (very bearish) to +2 (very bullish).
+    """
+    parts = []  # (weight, score, reason)
+
+    # GIFT NIFTY — strongest predictor of NIFTY open (35%)
+    if gift_chg is not None:
+        s = _score(gift_chg, (0.1, 0.3))
+        parts.append((0.35, s, f"GIFT NIFTY {gift_chg:+.2f}%"))
+
+    # US futures avg — overnight risk sentiment (25%)
+    fut_vals = [x for x in (sp_fut, nq_fut) if x is not None]
+    if fut_vals:
+        avg = sum(fut_vals) / len(fut_vals)
+        s = _score(avg, (0.2, 0.5))
+        label = "US futures green" if avg > 0.05 else "US futures red" if avg < -0.05 else "US futures flat"
+        parts.append((0.25, s, label))
+
+    # NIFTY 50 prev close (15%)
+    if nifty_chg is not None:
+        s = _score(nifty_chg, (0.3, 0.6))
+        parts.append((0.15, s, None))
+
+    # Crude — lower is better for India import bill (10%)
+    if crude_chg is not None:
+        s = -_score(crude_chg, (0.5, 1.5))  # inverted: up = bad
+        label = "crude soft" if crude_chg < -0.3 else "crude up" if crude_chg > 0.3 else None
+        parts.append((0.10, s, label))
+
+    # USD/INR — lower = stronger INR = good for FII flows (10%)
+    if usdinr_chg is not None:
+        s = -_score(usdinr_chg, (0.05, 0.15))  # inverted: INR up = bad
+        parts.append((0.10, s, None))
+
+    # US 10Y yield — lower = risk-on = good for EMs (5%)
+    if us10y_chg is not None:
+        s = -_score(us10y_chg, (0.5, 1.5))  # inverted: yield up = bad
+        parts.append((0.05, s, None))
+
+    if not parts:
+        return '🟡', 'MIXED', 'Insufficient data'
+
+    total_w = sum(w for w, _, _ in parts)
+    weighted = sum(w * s for w, s, _ in parts) / total_w
+
+    if weighted > 0.3:
+        emoji, label = '🟢', 'BULLISH'
+    elif weighted < -0.3:
+        emoji, label = '🔴', 'BEARISH'
+    else:
+        emoji, label = '🟡', 'MIXED'
+
+    reasoning = ' · '.join(r for _, _, r in parts if r) or 'No strong signals'
+    return emoji, label, reasoning
+
+
 def build_message():
     timing = MarketTimingManager()
     now = timing.get_ist_time()
     today_str = now.strftime('%A, %d %b %Y')
 
-    equities = fetch_markets(EQUITIES)
-    futures = fetch_markets(FUTURES)
-    commodities = fetch_markets(COMMODITIES)
+    equities, eq_raw = fetch_markets(EQUITIES)
+    futures, fut_raw = fetch_markets(FUTURES)
+    commodities, com_raw = fetch_markets(COMMODITIES)
     gift_nifty, gift_nifty_chg = compute_gift_nifty()
     news = fetch_news()
+
+    # Extract raw change pcts for trend prediction
+    nifty_chg = eq_raw.get('^NSEI', (None, None))[1]
+    sp_fut_chg = fut_raw.get('ES=F', (None, None))[1]
+    nq_fut_chg = fut_raw.get('NQ=F', (None, None))[1]
+    crude_chg = com_raw.get('CL=F', (None, None))[1]
+    usdinr_chg = com_raw.get('INR=X', (None, None))[1]
+    us10y_chg = com_raw.get('^TNX', (None, None))[1]
+
+    pred_emoji, pred_label, pred_reason = compute_trend_prediction(
+        gift_nifty_chg, sp_fut_chg, nq_fut_chg, nifty_chg,
+        crude_chg, usdinr_chg, us10y_chg,
+    )
 
     parts = [
         "🌅 <b>NIFTY PRE-MARKET BRIEF</b>",
@@ -158,6 +245,14 @@ def build_message():
         parts += ["", "📈 <b>FUTURES</b>", *futures]
     if commodities:
         parts += ["", "💰 <b>COMMODITIES / FX</b>", *commodities]
+
+    # Trend prediction
+    parts += [
+        "",
+        f"📊 <b>MARKET TREND PREDICTION</b>",
+        f"{pred_emoji} <b>{pred_label}</b> — {pred_reason}",
+    ]
+
     if news:
         parts += ["", "📰 <b>LATEST NEWS</b> <i>(investing.com)</i>",
                   *(f"• {h}" for h in news)]
