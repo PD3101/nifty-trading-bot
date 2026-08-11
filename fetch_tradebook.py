@@ -76,23 +76,37 @@ async def login_kite_web(p):
         logger.warning("Did not reach dashboard. URL: %s", page.url)
 
     cookies = {c['name']: c['value'] for c in await context.cookies()}
-    logger.info("Has enctoken cookie: %s", 'enctoken' in cookies)
+    enctoken = cookies.get('enctoken')
+    logger.info("Has enctoken cookie: %s", bool(enctoken))
+    if enctoken:
+        # The web login sets enctoken on kite.zerodha.com; replicate it for
+        # the console domain so console.zerodha.com gets authenticated too.
+        try:
+            await context.add_cookies([{
+                'name': 'enctoken', 'value': enctoken,
+                'domain': 'zerodha.com', 'path': '/',
+            }])
+            logger.info("Added enctoken cookie for .zerodha.com")
+        except Exception as e:
+            logger.warning("Could not add console cookie: %s", e)
     return page, context, browser
 
 
 async def fetch_in_page(page, url):
     """Fetch a URL from inside the console page (carries cookies + Cloudflare)."""
-    return await page.evaluate("""async (url) => {
+    result = await page.evaluate("""async (url) => {
         try {
             const r = await fetch(url, {
                 headers: {'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json'}
             });
             const text = await r.text();
-            return {status: r.status, body: text};
+            return {status: r.status, ok: r.ok, len: text.length, head: text.slice(0, 400)};
         } catch (e) {
-            return {status: -1, body: String(e)};
+            return {status: -1, ok: false, len: 0, head: 'EXC: ' + String(e)};
         }
     }""", url)
+    logger.info("EVAL %s -> %s", url.split('?')[0], json.dumps(result))
+    return result
 
 
 async def try_tradebook_endpoints(page):
@@ -108,12 +122,15 @@ async def try_tradebook_endpoints(page):
         f'https://console.zerodha.com/reports/tradebook?segment=FO&start_date={start}&end_date={end}',
     ]
     for url in candidates:
-        status, body = await fetch_in_page(page, url)
-        snippet = body[:200].replace('\n', ' ')
-        logger.info("FETCH %s -> %s :: %s", url.split('?')[0], status, snippet)
-        if status == 200 and body.lstrip().startswith('['):
+        result = await fetch_in_page(page, url)
+        if result.get('status') == 200 and result.get('len', 0) > 0 and result.get('head', '').lstrip().startswith('['):
+            body = result['head']
+            # fetch the full body if it looks like JSON array
+            full = await page.evaluate("""async (u) => (await (await fetch(u, {
+                headers: {'X-Requested-With':'XMLHttpRequest','Accept':'application/json'}
+            })).text())""", url)
             try:
-                return json.loads(body)
+                return json.loads(full)
             except Exception:
                 pass
     return None
