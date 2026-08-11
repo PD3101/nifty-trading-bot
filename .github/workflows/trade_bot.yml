@@ -22,6 +22,11 @@ on:
         required: false
         default: false
         type: boolean
+      fetch_trades:
+        description: 'Fetch today''s executed Kite trades and print them (trade book update)'
+        required: false
+        default: false
+        type: boolean
 
 # Never run two checks at once (protects bot_state.json from races).
 concurrency:
@@ -63,7 +68,12 @@ jobs:
             nifty-state-
 
       - name: Run bot check
-        run: python github_actions_runner.py
+        run: |
+          if [ "${{ github.event.inputs.fetch_trades }}" == "true" ]; then
+            python fetch_today_trades.py
+          else
+            python github_actions_runner.py
+          fi
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
