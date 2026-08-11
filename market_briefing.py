@@ -11,13 +11,19 @@ Runs via .github/workflows/market_briefing.yml (cron 30 3 * * 1-5 = 09:00 IST).
 import sys
 import re
 import xml.etree.ElementTree as ET
-from datetime import datetime
+from datetime import datetime, time as dtime
 from io import BytesIO
 
 import yfinance as yf
 
 from market_timing import MarketTimingManager
 from telegram_notifier import TelegramNotifier
+
+# Only send the brief inside the pre-market window. GitHub's schedule cron
+# can fire hours late; without this gate a delayed run would spam duplicate
+# mid-day briefs (observed: 11:31 & 11:41 IST on 2026-08-11).
+BRIEF_WINDOW_START = dtime(7, 45)
+BRIEF_WINDOW_END = dtime(9, 15)
 
 # (label, yahoo symbol, emoji)
 EQUITIES = [
@@ -285,6 +291,11 @@ def main():
 
     timing = MarketTimingManager()
     now = timing.get_ist_time()
+
+    # Skip outside the pre-market window (late/delayed GH cron runs become no-ops)
+    if not (BRIEF_WINDOW_START <= now.time() <= BRIEF_WINDOW_END):
+        print(f"Outside pre-market window ({now.strftime('%H:%M')} IST) - skipping briefing")
+        return
 
     # Skip on weekends / NSE holidays (briefing only on trading days)
     if not timing.is_weekday(now) or timing.is_holiday(now):

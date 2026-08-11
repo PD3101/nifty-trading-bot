@@ -27,20 +27,38 @@ IST = pytz.timezone('Asia/Kolkata')
 
 
 def load_credentials():
-    """Load Kite credentials from env vars or kite_credentials.json."""
+    """Load Kite credentials from env vars or kite_credentials.json.
+
+    The persisted kite_credentials.json (cached & restored across GitHub
+    Actions runs) is the source of truth for the ACCESS TOKEN. The env
+    KITE_ACCESS_TOKEN is a static secret that goes stale, which forced a
+    fresh login on EVERY run and logged the user out of other Kite devices
+    every ~2 minutes. Prefer the file token so one login is reused for its
+    full ~24h validity; env creds are only a fallback when no file exists.
+    """
     api_key = os.getenv('KITE_API_KEY')
     api_secret = os.getenv('KITE_API_SECRET')
     access_token = os.getenv('KITE_ACCESS_TOKEN')
 
-    if api_key and api_secret and access_token:
+    # Prefer the persisted (refreshed) token from the cache file.
+    cred_file = os.path.join(os.path.dirname(__file__), 'kite_credentials.json')
+    file_creds = None
+    if os.path.exists(cred_file):
+        try:
+            with open(cred_file) as f:
+                file_creds = json.load(f)
+        except Exception:
+            file_creds = None
+
+    if file_creds and file_creds.get('access_token'):
+        api_key = file_creds.get('api_key') or api_key
+        api_secret = file_creds.get('api_secret') or api_secret
+        access_token = file_creds['access_token']
         return api_key, api_secret, access_token
 
-    # Fallback to file
-    cred_file = os.path.join(os.path.dirname(__file__), 'kite_credentials.json')
-    if os.path.exists(cred_file):
-        with open(cred_file) as f:
-            creds = json.load(f)
-        return creds['api_key'], creds['api_secret'], creds['access_token']
+    # Fallback to env vars (e.g. first deploy, before any token is cached).
+    if api_key and api_secret and access_token:
+        return api_key, api_secret, access_token
 
     return None, None, None
 

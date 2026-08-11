@@ -8,7 +8,8 @@ on:
   schedule:
     - cron: '55 2 * * 1-5'   # 08:25 IST — pre-market bootstrap (chain takes over)
     - cron: '*/5 4-9 * * 1-5'
-    - cron: '0 10 * * 1-5'
+    - cron: '0 10 * * 1-5'   # 15:30 IST — EOD force-close (chain also runs to 15:36)
+    - cron: '5 10 * * 1-5'   # 15:35 IST — EOD force-close backup
   workflow_dispatch:
     inputs:
       test:

@@ -69,6 +69,11 @@ PULLBACK_LOOKBACK = 3         # Check last 3 candles for pullback
 # No-chase: don't enter after N consecutive candles in the same direction
 NO_CHASE_CANDLES = 4          # Skip if last 4+ candles all same direction
 
+# No new entries after this IST time. Late-day setups (especially after
+# lunch) are often fake breakouts that don't leave enough time for the
+# 1:2 target to work. Configurable — set to "" to disable.
+NO_ENTRY_AFTER = "14:30"      # IST — no new entries in the last hour
+
 # ============================================================================
 # EXIT RULES
 # ============================================================================

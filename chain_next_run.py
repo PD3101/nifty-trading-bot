@@ -28,15 +28,17 @@ logging.basicConfig(
 logger = logging.getLogger('chain')
 
 IST = pytz.timezone('Asia/Kolkata')
-# Chain starts at 08:25 IST (pre-market bootstrap) and runs until market close.
-# Early runs exit via can_trade_now() but keep the chain alive so the first
-# real scan fires on time at 09:15.
+# Chain starts at 08:25 IST (pre-market bootstrap) and runs until ~6 min
+# past market close. Early runs exit via can_trade_now() but keep the chain
+# alive so the first real scan fires on time at 09:15. The extra minutes
+# past 15:30 guarantee a post-close run that force-closes any open position
+# (no-carry-forward rule) — a run queued at 15:29 can land after 15:30.
 CHAIN_START = dtime(8, 25)
-MARKET_CLOSE = dtime(15, 30)
+MARKET_CLOSE = dtime(15, 36)
 
 
 def should_chain():
-    """Return True if we're within market hours on a weekday."""
+    """Return True if we're within the chain window on a weekday."""
     now = datetime.now(IST)
     if now.weekday() >= 5:
         return False

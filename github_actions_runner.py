@@ -40,6 +40,8 @@ IST = 'Asia/Kolkata'
 LUNCH_START = dtime(12, 30)
 LUNCH_END = dtime(14, 0)
 MARKET_CLOSE_TIME = dtime(15, 30)
+# No new entries after this IST time (configurable; "" disables the guard).
+NO_ENTRY_AFTER = dtime(*map(int, config.NO_ENTRY_AFTER.split(':'))) if config.NO_ENTRY_AFTER else None
 
 
 # ======================================================================
@@ -247,11 +249,14 @@ def main():
 
     state = load_state()
 
-    # --- Daily reset ---
+    # --- Daily reset: reset daily counters but KEEP any open position so it
+    # gets settled by the exit logic below (no-carry-forward rule — every
+    # trade must close intraday). ---
     if state.get('date') != today:
+        prev_position = state.get('open_position')
         state = {
             'date': today,
-            'open_position': None,
+            'open_position': prev_position,
             'consecutive_failures': 0,
             'trades_today': 0,
             'losses_today': 0,
@@ -327,19 +332,19 @@ def main():
         print(f"Scan complete: {len(signals)} signals")
         return
 
-    # --- Trading window checks ---
-    if not timing.can_trade_now():
-        save_state(state)
-        return
+    # --- Entry vs exit gates ---
+    # New entries only during the trading window. Exits (including the
+    # end-of-day / next-day force close) run whenever a position is open,
+    # even after market close — this guarantees the no-carry-forward rule.
+    have_position = state.get('open_position') is not None
+    can_enter = (
+        timing.can_trade_now()
+        and not (LUNCH_START <= now.time() <= LUNCH_END)
+        and not state.get('daily_stopped')
+        and (NO_ENTRY_AFTER is None or now.time() < NO_ENTRY_AFTER)
+    )
 
-    # Lunch hour filter
-    if LUNCH_START <= now.time() <= LUNCH_END:
-        logger.info("Lunch hour — skipping")
-        save_state(state)
-        return
-
-    # Daily stop check
-    if state.get('daily_stopped'):
+    if not have_position and not can_enter:
         save_state(state)
         return
 
