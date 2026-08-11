@@ -92,24 +92,25 @@ async def login_kite_web(p):
     return page, context, browser
 
 
-async def fetch_in_page(page, url):
+async def fetch_in_page(page, url, csrf=None):
     """Fetch a URL from inside the console page (carries cookies + Cloudflare)."""
-    result = await page.evaluate("""async (url) => {
+    csrf_arg = csrf or ''
+    result = await page.evaluate("""async ({url, csrf}) => {
         try {
-            const r = await fetch(url, {
-                headers: {'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json'}
-            });
+            const headers = {'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json'};
+            if (csrf) headers['X-CSRFToken'] = csrf;
+            const r = await fetch(url, {headers});
             const text = await r.text();
             return {status: r.status, ok: r.ok, len: text.length, head: text.slice(0, 400)};
         } catch (e) {
             return {status: -1, ok: false, len: 0, head: 'EXC: ' + String(e)};
         }
-    }""", url)
+    }""", {'url': url, 'csrf': csrf_arg})
     logger.info("EVAL %s -> %s", url.split('?')[0], json.dumps(result))
     return result
 
 
-async def try_tradebook_endpoints(page):
+async def try_tradebook_endpoints(page, csrf, cookies):
     """Try plausible console tradebook URLs via in-page fetch; return JSON list or None."""
     now_ist = datetime.utcnow() + IST_OFFSET
     start = (now_ist - timedelta(days=14)).strftime('%Y-%m-%d')
@@ -119,16 +120,17 @@ async def try_tradebook_endpoints(page):
         f'https://console.zerodha.com/api/reports/tradebook?segment=FO&start_date={start}&end_date={end}',
         f'https://console.zerodha.com/api/reports/tradebook?segment=FO',
         'https://console.zerodha.com/api/reports/tradebook',
-        f'https://console.zerodha.com/reports/tradebook?segment=FO&start_date={start}&end_date={end}',
     ]
     for url in candidates:
-        result = await fetch_in_page(page, url)
-        if result.get('status') == 200 and result.get('len', 0) > 0 and result.get('head', '').lstrip().startswith('['):
-            body = result['head']
-            # fetch the full body if it looks like JSON array
-            full = await page.evaluate("""async (u) => (await (await fetch(u, {
-                headers: {'X-Requested-With':'XMLHttpRequest','Accept':'application/json'}
-            })).text())""", url)
+        result = await fetch_in_page(page, url, csrf)
+        head = result.get('head', '')
+        if result.get('status') == 200 and result.get('len', 0) > 0 and head.lstrip().startswith('['):
+            # fetch the full body
+            full = await page.evaluate("""async ({url, csrf}) => {
+                const h = {'X-Requested-With':'XMLHttpRequest','Accept':'application/json'};
+                if (csrf) h['X-CSRFToken'] = csrf;
+                return await (await fetch(url, {headers:h})).text();
+            }""", {'url': url, 'csrf': csrf or ''})
             try:
                 return json.loads(full)
             except Exception:
@@ -142,16 +144,44 @@ async def main():
     async with pw_api.async_playwright() as p:
         page, context, browser = await login_kite_web(p)
 
-        # Load console tradebook page once (passes Cloudflare, sets console cookies).
+        # 1) Log into the console via SSO (it reuses the Kite web session).
+        try:
+            await page.goto('https://console.zerodha.com/', wait_until='domcontentloaded', timeout=45000)
+            await page.wait_for_timeout(5000)
+            logger.info("Console URL after goto: %s", page.url)
+            # If a login page is shown, click through (SSO via existing Kite session).
+            login_btn = await page.query_selector('a[href*="login"], button:has-text("Login"), '
+                                                  'button:has-text("Continue"), a:has-text("Login")')
+            if login_btn:
+                logger.info("Console login prompt found — clicking through SSO")
+                await login_btn.click()
+                await page.wait_for_timeout(8000)
+            logger.info("Console after SSO: %s | %s", page.url, await page.title())
+        except Exception as e:
+            logger.warning("console login nav error: %s", e)
+
+        # 2) Open the tradebook page.
         try:
             await page.goto('https://console.zerodha.com/reports/tradebook',
                             wait_until='domcontentloaded', timeout=45000)
             await page.wait_for_timeout(8000)
-            logger.info("Console tradebook page loaded: %s", page.url)
+            logger.info("Tradebook page: %s | %s", page.url, await page.title())
         except Exception as e:
-            logger.warning("console nav error: %s", e)
+            logger.warning("tradebook nav error: %s", e)
 
-        trades = await try_tradebook_endpoints(page)
+        # 3) Grab the CSRF token (cookie or meta) for the console API.
+        console_cookies = {c['name']: c['value'] for c in await context.cookies()}
+        csrf = console_cookies.get('csrf') or console_cookies.get('_csrf')
+        logger.info("Console cookies: %s", [{'name': k, 'has': bool(v)} for k, v in console_cookies.items()])
+        if not csrf:
+            try:
+                csrf = await page.evaluate(
+                    """() => { const m = document.querySelector('meta[name="csrf-token"]'); return m ? m.getAttribute('content') : null; }""")
+            except Exception:
+                pass
+        logger.info("CSRF token found: %s", bool(csrf))
+
+        trades = await try_tradebook_endpoints(page, csrf, console_cookies)
         await browser.close()
 
         if trades:
