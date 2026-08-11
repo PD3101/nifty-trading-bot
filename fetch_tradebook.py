@@ -3,8 +3,9 @@ Pull the user's FULL Kite Console tradebook (F&O, historical) automatically.
 
 Kite Connect's public API (kite.trades()) only exposes TODAY's trades, so the
 console tradebook must be fetched via the authenticated web session. This
-script logs into the Kite WEB APP (kite.zerodha.com), captures the
-enctoken cookie, then fetches the console tradebook for the F&O segment.
+script logs into the Kite web app (kite.zerodha.com), then makes the console
+API calls from INSIDE the authenticated browser page (in-page fetch carries
+the enctoken cookie + passes Cloudflare bot-check).
 
 Intended to run in GitHub Actions (has the Kite login secrets).
 """
@@ -14,7 +15,6 @@ import json
 import logging
 import os
 import sys
-import urllib.request
 from datetime import datetime, timedelta
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -24,7 +24,7 @@ IST_OFFSET = timedelta(hours=5, minutes=30)
 
 
 async def login_kite_web(p):
-    """Login to the Kite web app (kite.zerodha.com); return (enctoken, page, context, browser)."""
+    """Login to the Kite web app; return (page, context, browser)."""
     import pyotp
 
     client_id = os.getenv('KITE_CLIENT_ID')
@@ -40,36 +40,21 @@ async def login_kite_web(p):
 
     logger.info("Navigating to kite.zerodha.com...")
     await page.goto('https://kite.zerodha.com/', wait_until='networkidle', timeout=30000)
-    logger.info("Loaded: %s | %s", page.url, await page.title())
-
-    # Fill credentials — the web login form uses #userid and #password
-    try:
-        await page.wait_for_selector('#userid', timeout=10000)
-    except Exception:
-        logger.error("Kite login form not found at %s. Content: %s", page.url, (await page.content())[:800])
-        await browser.close()
-        return None, None, None, None
+    await page.wait_for_selector('#userid', timeout=10000)
 
     await page.fill('#userid', client_id)
     await page.fill('#password', password)
     await page.click('button[type="submit"]')
 
-    # Wait for TOTP page (or dashboard if no 2FA)
     try:
-        await page.wait_for_selector('input[type="number"], input[type="text"][autocomplete="one-time-code"]',
-                                     timeout=15000)
-        logger.info("TOTP page loaded at %s", page.url)
+        await page.wait_for_selector('input[type="number"]', timeout=15000)
         totp_input = await page.query_selector('input[type="number"]')
-        if not totp_input:
-            totp_input = await page.query_selector('input[autocomplete="one-time-code"]')
         if totp_input:
             await totp_input.fill(totp.now())
             await page.wait_for_timeout(500)
-        # click continue/submit
         try:
             btn = await page.wait_for_selector('button:has-text("continue"):not([disabled]), '
-                                               'button:has-text("Continue"):not([disabled])',
-                                               timeout=8000)
+                                               'button:has-text("Continue"):not([disabled])', timeout=8000)
             await btn.click()
         except Exception:
             buttons = await page.query_selector_all('button')
@@ -82,42 +67,36 @@ async def login_kite_web(p):
                     await btn.click()
                     break
     except Exception as e:
-        logger.info("No separate TOTP page; may already be logged in or 2FA not required: %s", e)
+        logger.info("No TOTP page / already logged in: %s", e)
 
-    # Wait for dashboard
     try:
         await page.wait_for_url('**/dashboard**', timeout=20000)
         logger.info("Dashboard loaded: %s", page.url)
     except Exception:
-        logger.warning("Did not reach dashboard. Current URL: %s", page.url)
+        logger.warning("Did not reach dashboard. URL: %s", page.url)
 
-    cookies = await context.cookies()
-    logger.info("Cookies: %s", [{'name': c['name'], 'domain': c['domain']} for c in cookies])
-    cookie_dict = {c['name']: c['value'] for c in cookies}
-    enctoken = cookie_dict.get('enctoken')
-
-    return enctoken, page, context, browser
+    cookies = {c['name']: c['value'] for c in await context.cookies()}
+    logger.info("Has enctoken cookie: %s", 'enctoken' in cookies)
+    return page, context, browser
 
 
-def call_api(enctoken, url):
-    """Hit a console endpoint with the enctoken sent as a Cookie header."""
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 '
-                      '(KHTML, like Gecko) Chrome/126.0 Safari/537.36',
-        'Cookie': f'enctoken={enctoken}',
-        'X-Requested-With': 'XMLHttpRequest',
-    }
-    req = urllib.request.Request(url, headers=headers)
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            body = resp.read().decode('utf-8', errors='replace')
-            return resp.status, body
-    except Exception as e:
-        return getattr(e, 'code', 'ERR'), str(e)
+async def fetch_in_page(page, url):
+    """Fetch a URL from inside the console page (carries cookies + Cloudflare)."""
+    return await page.evaluate("""async (url) => {
+        try {
+            const r = await fetch(url, {
+                headers: {'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json'}
+            });
+            const text = await r.text();
+            return {status: r.status, body: text};
+        } catch (e) {
+            return {status: -1, body: String(e)};
+        }
+    }""", url)
 
 
-async def try_direct_api(enctoken):
-    """Try plausible console tradebook endpoints; return JSON list or None."""
+async def try_tradebook_endpoints(page):
+    """Try plausible console tradebook URLs via in-page fetch; return JSON list or None."""
     now_ist = datetime.utcnow() + IST_OFFSET
     start = (now_ist - timedelta(days=14)).strftime('%Y-%m-%d')
     end = now_ist.strftime('%Y-%m-%d')
@@ -126,51 +105,17 @@ async def try_direct_api(enctoken):
         f'https://console.zerodha.com/api/reports/tradebook?segment=FO&start_date={start}&end_date={end}',
         f'https://console.zerodha.com/api/reports/tradebook?segment=FO',
         'https://console.zerodha.com/api/reports/tradebook',
+        f'https://console.zerodha.com/reports/tradebook?segment=FO&start_date={start}&end_date={end}',
     ]
     for url in candidates:
-        status, body = call_api(enctoken, url)
+        status, body = await fetch_in_page(page, url)
         snippet = body[:200].replace('\n', ' ')
-        logger.info("GET %s -> %s :: %s", url.split('?')[0], status, snippet)
+        logger.info("FETCH %s -> %s :: %s", url.split('?')[0], status, snippet)
         if status == 200 and body.lstrip().startswith('['):
             try:
                 return json.loads(body)
             except Exception:
-                return None
-    return None
-
-
-async def fetch_via_browser(page, context):
-    """Load the console tradebook page and capture its own API responses."""
-    captured = {}
-
-    async def on_response(resp):
-        url = resp.url
-        if 'tradebook' in url or ('reports' in url and 'segment' in url):
-            try:
-                body = await resp.text()
-                captured[url] = body[:500000]
-            except Exception:
                 pass
-
-    page.on('response', on_response)
-    logger.info("Navigating to console tradebook page...")
-    try:
-        await page.goto('https://console.zerodha.com/reports/tradebook',
-                        wait_until='domcontentloaded', timeout=45000)
-        await page.wait_for_timeout(15000)
-    except Exception as e:
-        logger.warning("console nav error: %s", e)
-
-    logger.info("Captured %d response(s): %s", len(captured), list(captured.keys()))
-    for url, body in captured.items():
-        if body.lstrip().startswith('['):
-            try:
-                return json.loads(body)
-            except Exception:
-                pass
-    for url, body in captured.items():
-        print(f"CAPTURED {url}")
-        print(body[:200000])
     return None
 
 
@@ -178,25 +123,25 @@ async def main():
     import playwright.async_api as pw_api
 
     async with pw_api.async_playwright() as p:
-        enctoken, page, context, browser = await login_kite_web(p)
+        page, context, browser = await login_kite_web(p)
 
-        if not enctoken:
-            logger.error("No enctoken captured.")
-            sys.exit(2)
+        # Load console tradebook page once (passes Cloudflare, sets console cookies).
+        try:
+            await page.goto('https://console.zerodha.com/reports/tradebook',
+                            wait_until='domcontentloaded', timeout=45000)
+            await page.wait_for_timeout(8000)
+            logger.info("Console tradebook page loaded: %s", page.url)
+        except Exception as e:
+            logger.warning("console nav error: %s", e)
 
-        trades = await try_direct_api(enctoken)
-
-        if not trades:
-            logger.info("Direct API failed — trying in-browser interception...")
-            trades = await fetch_via_browser(page, context)
-
+        trades = await try_tradebook_endpoints(page)
         await browser.close()
 
         if trades:
             print(f"TRADEBOOK_TRADES:{len(trades)}")
             print(json.dumps(trades, indent=2, default=str)[:500000])
         else:
-            logger.error("All methods failed to fetch tradebook")
+            logger.error("Could not fetch tradebook from console")
             sys.exit(3)
 
 
