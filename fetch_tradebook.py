@@ -103,43 +103,63 @@ async def main():
         now_ist = datetime.utcnow() + IST_OFFSET
         start = (now_ist - timedelta(days=20)).strftime('%Y-%m-%d')
         end = now_ist.strftime('%Y-%m-%d')
-        data_url = (f'https://console.zerodha.com/api/reports/tradebook'
-                    f'?segment=FO&from_date={start}&to_date={end}')
-        found = None
-        # The report is generated asynchronously (state PENDING → READY); poll.
-        for attempt in range(15):
-            result = await page.evaluate(
-                """async ({url, headers}) => {
-                    try {
-                        const r = await fetch(url, {headers: headers, credentials: 'include'});
-                        return {status: r.status, text: await r.text()};
-                    } catch (e) {
-                        return {status: -1, text: 'EXC: ' + String(e)};
-                    }
-                }""",
-                {'url': data_url, 'headers': dict(heatmap_headers)})
-            status = result.get('status')
-            body = result.get('text', '')
-            logger.info("POLL %d status=%s body=%s", attempt, status, body[:250])
-            if status == 200:
-                try:
-                    parsed = json.loads(body)
-                    data = parsed.get('data', {})
-                    state = data.get('state')
-                    res = data.get('result', [])
-                    if state not in ('PENDING', None) or res:
-                        found = res
-                        logger.info("Report ready: state=%s results=%d", state, len(res) if isinstance(res, list) else -1)
-                        break
-                except Exception as e:
-                    logger.warning("parse error: %s", e)
-            await page.wait_for_timeout(3000)
+        async def api_get(url):
+            for attempt in range(15):
+                result = await page.evaluate(
+                    """async ({url, headers}) => {
+                        try {
+                            const r = await fetch(url, {headers: headers, credentials: 'include'});
+                            return {status: r.status, text: await r.text()};
+                        } catch (e) {
+                            return {status: -1, text: 'EXC: ' + String(e)};
+                        }
+                    }""",
+                    {'url': url, 'headers': dict(heatmap_headers)})
+                status = result.get('status')
+                body = result.get('text', '')
+                if status == 200:
+                    try:
+                        parsed = json.loads(body)
+                        data = parsed.get('data', {})
+                        state = data.get('state')
+                        if state not in ('PENDING', None) or data.get('result'):
+                            return parsed
+                    except Exception:
+                        pass
+                await page.wait_for_timeout(2500)
+            return None
+
+        base = 'https://console.zerodha.com/api/reports/tradebook'
+        all_trades = []
+        seen = set()
+        pagination = None
+        for offset in range(0, 1000, 100):
+            url = f'{base}?segment=FO&from_date={start}&to_date={end}&limit=100&offset={offset}'
+            parsed = await api_get(url)
+            if not parsed:
+                logger.error("No response for offset %d", offset)
+                break
+            data = parsed.get('data', {})
+            pagination = data.get('pagination')
+            res = data.get('result', []) or []
+            fresh = [t for t in res if t.get('trade_id') not in seen]
+            all_trades.extend(fresh)
+            for t in res:
+                if t.get('trade_id'):
+                    seen.add(t['trade_id'])
+            logger.info("offset=%d got=%d fresh=%d total=%d pagination=%s",
+                        offset, len(res), len(fresh), len(all_trades),
+                        json.dumps(pagination)[:200] if pagination else None)
+            if not res or len(fresh) == 0:
+                break
+            if pagination and not pagination.get('next'):
+                break
 
         await browser.close()
 
-    if found is not None:
-        print(f"TRADEBOOK_TRADES:{len(found)}")
-        print(json.dumps(found, indent=2, default=str)[:600000])
+    if all_trades:
+        print(f"TRADEBOOK_TRADES:{len(all_trades)}")
+        print(json.dumps(all_trades, indent=2, default=str)[:900000])
     else:
         logger.error("Could not fetch tradebook data")
         sys.exit(3)
