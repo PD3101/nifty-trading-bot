@@ -101,7 +101,7 @@ async def main():
 
         # Call the tradebook data endpoint with the page's own headers + date range
         now_ist = datetime.utcnow() + IST_OFFSET
-        start = (now_ist - timedelta(days=20)).strftime('%Y-%m-%d')
+        start = (now_ist - timedelta(days=35)).strftime('%Y-%m-%d')
         end = now_ist.strftime('%Y-%m-%d')
         async def api_get(url):
             for attempt in range(15):
@@ -133,11 +133,11 @@ async def main():
         all_trades = []
         seen = set()
         pagination = None
-        for offset in range(0, 1000, 100):
-            url = f'{base}?segment=FO&from_date={start}&to_date={end}&limit=100&offset={offset}'
+        for page_no in range(1, 25):
+            url = f'{base}?segment=FO&from_date={start}&to_date={end}&page={page_no}'
             parsed = await api_get(url)
             if not parsed:
-                logger.error("No response for offset %d", offset)
+                logger.error("No response for page %d", page_no)
                 break
             data = parsed.get('data', {})
             pagination = data.get('pagination')
@@ -147,12 +147,12 @@ async def main():
             for t in res:
                 if t.get('trade_id'):
                     seen.add(t['trade_id'])
-            logger.info("offset=%d got=%d fresh=%d total=%d pagination=%s",
-                        offset, len(res), len(fresh), len(all_trades),
+            logger.info("page=%d got=%d fresh=%d total=%d pagination=%s",
+                        page_no, len(res), len(fresh), len(all_trades),
                         json.dumps(pagination)[:200] if pagination else None)
             if not res or len(fresh) == 0:
                 break
-            if pagination and not pagination.get('next'):
+            if pagination and page_no >= pagination.get('total_pages', 0):
                 break
 
         await browser.close()
