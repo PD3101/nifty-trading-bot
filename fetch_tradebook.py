@@ -103,39 +103,41 @@ async def main():
         now_ist = datetime.utcnow() + IST_OFFSET
         start = (now_ist - timedelta(days=20)).strftime('%Y-%m-%d')
         end = now_ist.strftime('%Y-%m-%d')
-        candidates = [
-            f'https://console.zerodha.com/api/reports/tradebook?segment=FO&from_date={start}&to_date={end}',
-            f'https://console.zerodha.com/api/reports/tradebook?from_date={start}&to_date={end}',
-            f'https://console.zerodha.com/api/reports/tradebook?segment=FO&start_date={start}&end_date={end}',
-            'https://console.zerodha.com/api/reports/tradebook?segment=FO',
-        ]
+        data_url = (f'https://console.zerodha.com/api/reports/tradebook'
+                    f'?segment=FO&from_date={start}&to_date={end}')
         found = None
-        for url in candidates:
+        # The report is generated asynchronously (state PENDING → READY); poll.
+        for attempt in range(15):
             result = await page.evaluate(
                 """async ({url, headers}) => {
                     try {
                         const r = await fetch(url, {headers: headers, credentials: 'include'});
-                        const text = await r.text();
-                        return {status: r.status, len: text.length, head: text.slice(0, 300)};
+                        return {status: r.status, text: await r.text()};
                     } catch (e) {
-                        return {status: -1, len: 0, head: 'EXC: ' + String(e)};
+                        return {status: -1, text: 'EXC: ' + String(e)};
                     }
                 }""",
-                {'url': url, 'headers': dict(heatmap_headers)})
-            logger.info("DATA %s -> %s", url.split('?')[0], json.dumps(result))
-            if result.get('status') == 200 and result.get('head', '').lstrip().startswith('['):
-                full = await page.evaluate(
-                    """async ({url, headers}) => await (await fetch(url, {headers: headers, credentials: 'include'})).text()""",
-                    {'url': url, 'headers': dict(heatmap_headers)})
+                {'url': data_url, 'headers': dict(heatmap_headers)})
+            status = result.get('status')
+            body = result.get('text', '')
+            logger.info("POLL %d status=%s body=%s", attempt, status, body[:250])
+            if status == 200:
                 try:
-                    found = json.loads(full)
-                    break
-                except Exception:
-                    pass
+                    parsed = json.loads(body)
+                    data = parsed.get('data', {})
+                    state = data.get('state')
+                    res = data.get('result', [])
+                    if state not in ('PENDING', None) or res:
+                        found = res
+                        logger.info("Report ready: state=%s results=%d", state, len(res) if isinstance(res, list) else -1)
+                        break
+                except Exception as e:
+                    logger.warning("parse error: %s", e)
+            await page.wait_for_timeout(3000)
 
         await browser.close()
 
-    if found:
+    if found is not None:
         print(f"TRADEBOOK_TRADES:{len(found)}")
         print(json.dumps(found, indent=2, default=str)[:600000])
     else:
