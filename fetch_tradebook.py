@@ -1,10 +1,12 @@
 """
-Diagnose how console.zerodha.com/reports/tradebook loads its data.
+Pull the user's FULL Kite Console tradebook (F&O, historical) automatically.
 
-Logs in (Kite web + console SSO), opens the tradebook page, and prints:
-  - every XHR/fetch request (method, url, resourceType, headers)
-  - every JSON response (status, url, body snippet)
-  - the page HTML (to spot server-rendered data / date inputs / download button)
+Logs into Kite web + console (SSO), opens the tradebook page, captures the
+working request headers from the page's own heatmap call, then calls the
+tradebook data endpoint with the same headers (and a date range) via an
+in-page fetch. Prints the trades as JSON.
+
+Intended to run in GitHub Actions (has the Kite login secrets).
 """
 
 import asyncio
@@ -79,51 +81,65 @@ async def console_ssos(page):
 async def main():
     import playwright.async_api as pw_api
 
+    heatmap_headers = {}
+
     async with pw_api.async_playwright() as p:
         page, context, browser = await login_kite_web(p)
         await console_ssos(page)
 
-        requests = []
-        responses = []
-
         async def on_request(req):
-            if req.resource_type in ('xhr', 'fetch'):
-                requests.append({'method': req.method, 'url': req.url})
-
-        async def on_response(resp):
-            ct = resp.headers.get('content-type', '')
-            if 'json' in ct or 'api/report' in resp.url:
-                try:
-                    body = await resp.text()
-                except Exception:
-                    body = ''
-                responses.append({'status': resp.status, 'url': resp.url,
-                                  'ct': ct, 'body': body[:2000]})
+            if 'heatmap' in req.url or 'tradebook' in req.url:
+                heatmap_headers.update({k: v for k, v in req.headers.items()})
+                logger.info("CAPTURED HEADERS from %s: %s", req.url,
+                            json.dumps({k: v[:40] for k, v in req.headers.items()}))
 
         page.on('request', on_request)
-        page.on('response', on_response)
 
         await page.goto('https://console.zerodha.com/reports/tradebook',
                         wait_until='domcontentloaded', timeout=45000)
-        await page.wait_for_timeout(25000)
+        await page.wait_for_timeout(12000)
 
-        html = await page.content()
-        logger.info("Tradebook page: %s | HTML length=%d", page.url, len(html))
+        # Call the tradebook data endpoint with the page's own headers + date range
+        now_ist = datetime.utcnow() + IST_OFFSET
+        start = (now_ist - timedelta(days=14)).strftime('%Y-%m-%d')
+        end = now_ist.strftime('%Y-%m-%d')
+        candidates = [
+            f'https://console.zerodha.com/api/reports/tradebook?segment=FO&start_date={start}&end_date={end}',
+            f'https://console.zerodha.com/api/reports/tradebook?segment=FO',
+            'https://console.zerodha.com/api/reports/tradebook',
+        ]
+        found = None
+        for url in candidates:
+            result = await page.evaluate(
+                """async ({url, headers}) => {
+                    try {
+                        const r = await fetch(url, {headers: headers, credentials: 'include'});
+                        const text = await r.text();
+                        return {status: r.status, len: text.length, head: text.slice(0, 300)};
+                    } catch (e) {
+                        return {status: -1, len: 0, head: 'EXC: ' + String(e)};
+                    }
+                }""",
+                {'url': url, 'headers': dict(heatmap_headers)})
+            logger.info("DATA %s -> %s", url.split('?')[0], json.dumps(result))
+            if result.get('status') == 200 and result.get('head', '').lstrip().startswith('['):
+                full = await page.evaluate(
+                    """async ({url, headers}) => await (await fetch(url, {headers: headers, credentials: 'include'})).text()""",
+                    {'url': url, 'headers': dict(heatmap_headers)})
+                try:
+                    found = json.loads(full)
+                    break
+                except Exception:
+                    pass
 
         await browser.close()
 
-    # Emit diagnostics
-    print("=== XHR/FETCH REQUESTS ===")
-    for r in requests:
-        print(json.dumps(r))
-    print("=== JSON/REPORT RESPONSES ===")
-    for r in responses:
-        print(json.dumps(r)[:1500])
-    print("=== HTML markers ===")
-    import re
-    for m in re.findall(r'<input[^>]*date[^>]*>|download|Download|start_date|end_date|data-range|range', html, re.I)[:40]:
-        print(m)
-    print("HTML_LEN", len(html))
+    if found:
+        print(f"TRADEBOOK_TRADES:{len(found)}")
+        print(json.dumps(found, indent=2, default=str)[:600000])
+    else:
+        logger.error("Could not fetch tradebook data")
+        sys.exit(3)
 
 
 if __name__ == '__main__':
