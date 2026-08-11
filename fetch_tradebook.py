@@ -101,12 +101,13 @@ async def main():
 
         # Call the tradebook data endpoint with the page's own headers + date range
         now_ist = datetime.utcnow() + IST_OFFSET
-        start = (now_ist - timedelta(days=14)).strftime('%Y-%m-%d')
+        start = (now_ist - timedelta(days=20)).strftime('%Y-%m-%d')
         end = now_ist.strftime('%Y-%m-%d')
         candidates = [
+            f'https://console.zerodha.com/api/reports/tradebook?segment=FO&from_date={start}&to_date={end}',
+            f'https://console.zerodha.com/api/reports/tradebook?from_date={start}&to_date={end}',
             f'https://console.zerodha.com/api/reports/tradebook?segment=FO&start_date={start}&end_date={end}',
-            f'https://console.zerodha.com/api/reports/tradebook?segment=FO',
-            'https://console.zerodha.com/api/reports/tradebook',
+            'https://console.zerodha.com/api/reports/tradebook?segment=FO',
         ]
         found = None
         for url in candidates:
