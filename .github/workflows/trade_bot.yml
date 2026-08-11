@@ -27,6 +27,11 @@ on:
         required: false
         default: false
         type: boolean
+      fetch_tradebook:
+        description: 'Fetch FULL Kite console tradebook (historical, F&O) and print it'
+        required: false
+        default: false
+        type: boolean
 
 # Never run two checks at once (protects bot_state.json from races).
 concurrency:
@@ -69,7 +74,9 @@ jobs:
 
       - name: Run bot check
         run: |
-          if [ "${{ github.event.inputs.fetch_trades }}" == "true" ]; then
+          if [ "${{ github.event.inputs.fetch_tradebook }}" == "true" ]; then
+            python fetch_tradebook.py
+          elif [ "${{ github.event.inputs.fetch_trades }}" == "true" ]; then
             python fetch_today_trades.py
           else
             python github_actions_runner.py
