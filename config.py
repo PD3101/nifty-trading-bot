@@ -96,7 +96,7 @@ PARTIAL_BOOK_PERCENT = 50     # Book this % at 1:1
 MAX_POSITIONS = 1
 CAPITAL_PER_TRADE = 50000     # INR per trade
 POSITION_SIZE_LOTS = 1        # 1 lot = 65 qty (NIFTY)
-LOT_SIZE = 65
+LOT_SIZE = 65                 # ⚠️ VERIFY: NSE revised NIFTY lot size (recently 75). Parametrize before live use.
 
 MAX_TRADES_PER_DAY = 3        # Rule 12: max 2-3 trades/day
 MAX_LOSSES_PER_DAY = 2        # Rule 13: max 1-2 losses → STOP
@@ -116,7 +116,59 @@ GAP_THRESHOLD = 0.005         # 0.5% — informational only
 
 BACKTEST_START_DATE = "2026-08-01"
 BACKTEST_END_DATE = "2026-08-08"
-EXPIRY_DAY = 1                # Tuesday (NIFTY weekly expiry)
+EXPIRY_DAY = 1                # ⚠️ VERIFY vs NSE 2026 expiry calendar (NIFTY weekly commonly Thursday=3). Tuesday assumed per user.
+
+# ============================================================================
+# OPTION PRICING (Black-Scholes — replaces toy intrinsic+0.3*intrinsic model)
+# ============================================================================
+
+BS_RISK_FREE_RATE = 0.06       # risk-free (INR, approx)
+DAYS_TO_EXPIRY = 7             # weeks-to-expiry for T (weekly option)
+IV_METHOD = "realized"         # "realized" = rolling stdev of FUT returns; "fixed" = IV_FIXED
+IV_FIXED = 0.18                # used if IV_METHOD == "fixed"
+IV_FLOOR = 0.08                # clamp estimated IV (avoid nonsense)
+IV_CAP = 0.60                  # clamp estimated IV
+IV_WINDOW = 30                 # bars for rolling realized-vol estimate
+MIN_PREMIUM = 5.0              # liquidity proxy: skip if entry premium < ₹5 (deep OTM / illiquid)
+
+# ============================================================================
+# TRANSACTION COSTS (India F&O, per lot, per order) — approximations
+#   STT on options is charged on the SELL side only.
+# ============================================================================
+
+BROKERAGE_PER_ORDER = 20.0     # flat ₹/order (discount broker); entry + exit
+STT_PCT = 0.000625             # STT on OPTIONS SELL = 0.0625% of premium notional
+EXCHANGE_CHARGE_PCT = 0.0005   # NSE + SEBI + regulatory, ~% of premium notional/side
+STAMP_PCT = 0.00003            # stamp duty ~% of premium notional/side
+GST_PCT = 0.18                 # GST on (brokerage + exchange)
+SLIPPAGE_PCT = 0.001           # slippage % of premium notional per side
+
+# ============================================================================
+# ROBUSTNESS / OVERFITTING
+# ============================================================================
+
+WALK_FORWARD_FOLDS = 5         # rolling out-of-sample folds for the date range
+PARAM_SWEEP = True             # run a small parameter-sensitivity grid
+PARAM_SWEEP_MULT = [2.0, 3.0, 4.0]   # Supertrend multiplier grid
+PARAM_SWEEP_VWMA = [10, 20, 30]       # VWMA length grid
+MONTE_CARLO_RUNS = 2000        # bootstrap resamples for P&L distribution
+
+# ============================================================================
+# REGIME / LIQUIDITY FILTERS (gated — off by default)
+# ============================================================================
+
+REGIME_FILTER_ENABLED = False  # skip entries when realized vol > REGIME_VOL_ZSCORE σ
+REGIME_VOL_ZSCORE = 2.0
+LIQUIDITY_FILTER_ENABLED = True  # skip entries with premium < MIN_PREMIUM
+
+# ============================================================================
+# COMPLIANCE (SEBI Research Analyst view)
+# ============================================================================
+
+DISCLAIMER = ("⚠️ Algorithmic/educational signals only — NOT investment advice. "
+              "Options are high-risk; you can lose your full premium. Past performance ≠ future results.")
+BRIEF_PREDICTION_LABEL = "SENTIMENT GAUGE"   # was "trend prediction"
+GIFT_NIFTY_APPROX_NOTE = "GIFT NIFTY is approximated (no live ticker) — sentiment only."
 
 # ============================================================================
 # SYSTEM RULES (NON-NEGOTIABLE)

@@ -9,6 +9,7 @@ Runs via .github/workflows/market_briefing.yml (cron 30 3 * * 1-5 = 09:00 IST).
 """
 
 import sys
+import config
 import re
 import xml.etree.ElementTree as ET
 from datetime import datetime, time as dtime
@@ -255,7 +256,7 @@ def build_message():
         parts += [
             "🇮🇳 <b>GIFT NIFTY (implied):</b> "
             f"{gift_nifty:,.2f} <i>(US futures {gift_nifty_chg:+.2f}%)</i>",
-            "    <i>— computed from NIFTY close + S&P 500 futures overnight move</i>\n",
+            f"    <i>— {config.GIFT_NIFTY_APPROX_NOTE}</i>\n",
         ]
 
     parts += ["🌍 <b>INTERNATIONAL MARKETS</b>", *equities]
@@ -268,8 +269,9 @@ def build_message():
     # Trend prediction
     parts += [
         "",
-        f"📊 <b>MARKET TREND PREDICTION</b>",
+        f"📊 <b>{config.BRIEF_PREDICTION_LABEL}</b>",
         f"{pred_emoji} <b>{pred_label}</b> — {pred_reason}",
+        f"<i>{config.GIFT_NIFTY_APPROX_NOTE}</i>",
     ]
 
     if news:
@@ -279,6 +281,8 @@ def build_message():
     parts += [
         "",
         "⏰ Markets open <b>09:15</b> · trading starts <b>09:45</b> IST",
+        "",
+        f"<i>{config.DISCLAIMER}</i>",
     ]
     return "\n".join(parts)
 

@@ -1,277 +1,411 @@
 """
-Backtesting Engine — aligned with actual strategy
+Backtesting Engine — v2 (SEBI-RA grade)
 
-- 3-minute chart only (no 15m HTF bias)
-- Pullback to VWMA-20 trigger + no-chase filter
-- Stoploss: Supertrend level of entry candle
-- Target: 1:2 Risk-Reward (hybrid: 50% at 1:1, trail for 1:2)
-- Max 2-3 trades/day, max 1-2 losses/day then stop
+Improvements over v1:
+  * Options priced with Black-Scholes (option_pricer) using an estimated IV,
+    instead of the toy intrinsic+0.3*intrinsic model. Premiums now move with
+    spot via delta and decay with time via theta.
+  * Full India F&O transaction-cost model (brokerage, STT on sell, exchange,
+    stamp, GST, slippage).
+  * Real risk metrics: expectancy, profit factor, max drawdown, equity curve.
+  * Monte Carlo (bootstrap) on the trade list.
+  * Walk-forward out-of-sample folds + parameter-sensitivity grid (overfit check).
+  * Regime + liquidity filters (gated).
+
+Run:
+    python backtester.py                 # live Kite data (needs creds)
+    python backtester.py --mock          # synthetic futures, no creds
+    python backtester.py --mock --walkforward
+    python backtester.py --mock --sensitivity
 """
 
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time as dtime
+
 import config
-from data_fetcher import DataFetcher
 from indicators import Indicators
 from strategy import StrategyEngine
+from option_pricer import price_option, estimate_iv, option_costs
 
 
+# ============================================================================
+# Synthetic futures data (so the backtester runs without Kite credentials)
+# ============================================================================
+def generate_synthetic_futures(days=40, seed=42):
+    """GBM with slowly-rotating drift → produces trends + pullbacks (entries)."""
+    rng = np.random.default_rng(seed)
+    start = datetime(2026, 8, 1, 9, 15)
+    ts = []
+    for d in range(days):
+        day = start + timedelta(days=d)
+        if day.weekday() >= 5:
+            continue
+        t = datetime.combine(day, dtime(9, 15))
+        end = datetime.combine(day, dtime(15, 30))
+        while t <= end:
+            ts.append(t)
+            t += timedelta(minutes=3)
+    n = len(ts)
+    close = np.empty(n)
+    close[0] = 24500.0
+    for i in range(1, n):
+        drift = 0.00010 * np.sin(i / 220.0)          # rotating regime
+        shock = rng.normal(0, 0.0013)                  # per-3m vol
+        close[i] = close[i - 1] * np.exp(drift + shock)
+    df = pd.DataFrame(index=pd.DatetimeIndex(ts))
+    df["close"] = close
+    df["open"] = np.concatenate([[close[0]], close[:-1]])
+    hi = np.maximum(df["open"].values, df["close"].values)
+    lo = np.minimum(df["open"].values, df["close"].values)
+    df["high"] = hi * (1 + np.abs(rng.normal(0, 0.0004, n)))
+    df["low"] = lo * (1 - np.abs(rng.normal(0, 0.0004, n)))
+    df["volume"] = rng.integers(80_000, 300_000, n).astype(float)
+    return df
+
+
+# ============================================================================
+# Trade record
+# ============================================================================
 class Trade:
-    def __init__(self, signal, entry_time, entry_price, stoploss_premium,
-                 target_1_1, target_1_2):
+    def __init__(self, signal, entry_time, entry_premium, sl_premium,
+                 target_1_1, target_1_2, iv, T):
         self.signal = signal
         self.entry_time = entry_time
-        self.entry_price = entry_price
-        self.stoploss_premium = stoploss_premium
+        self.entry_premium = entry_premium
+        self.sl_premium = sl_premium
         self.target_1_1 = target_1_1
         self.target_1_2 = target_1_2
+        self.iv = iv
+        self.T = T
         self.exit_time = None
-        self.exit_price = None
+        self.exit_premium = None
         self.exit_reason = None
-        self.pnl = 0
-        self.pnl_percent = 0
-        self.status = 'OPEN'
+        self.pnl = 0.0
+        self.costs = 0.0
+        self.status = "OPEN"
         self.partial_booked = False
-        self.partial_pnl = 0
-
-    def close(self, exit_time, exit_price, reason, partial=False):
-        lot = config.LOT_SIZE  # 65 for NIFTY
-        if partial:
-            # Book 50% at current price
-            self.partial_pnl = (exit_price - self.entry_price) * 0.5 * lot
-            self.partial_booked = True
-            return
-
-        self.exit_time = exit_time
-        self.exit_price = exit_price
-        self.exit_reason = reason
-        self.status = 'CLOSED'
-        pnl_full = (exit_price - self.entry_price) * lot
-        # If partial was booked, remaining 50% P&L
-        pnl_remaining = pnl_full * 0.5
-        self.pnl = self.partial_pnl + pnl_remaining
-        self.pnl_percent = (self.pnl / (self.entry_price * lot)) * 100 if self.entry_price else 0
+        self.partial_pnl = 0.0
 
 
-def simulate_option_price(spot_price, strike, option_type):
-    if option_type == 'CALL':
-        intrinsic = max(0, spot_price - strike)
-    else:
-        intrinsic = max(0, strike - spot_price)
-    time_value = intrinsic * 0.3 if intrinsic > 0 else spot_price * 0.01
-    return intrinsic + time_value
-
-
+# ============================================================================
+# Backtester
+# ============================================================================
 class Backtester:
-    def __init__(self, start_date=None, end_date=None):
+    def __init__(self, start_date=None, end_date=None, mock=False):
         self.start_date = start_date or config.BACKTEST_START_DATE
         self.end_date = end_date or config.BACKTEST_END_DATE
-        self.data_fetcher = DataFetcher(self.start_date, self.end_date)
+        self.mock = mock
         self.strategy = StrategyEngine()
-        self.trades = []
-        self.open_trade = None
-        self.signals_log = []
-        self.trades_today = 0
-        self.losses_today = 0
-        self.daily_stopped = False
-        self.current_date = None
 
-    def run_backtest(self):
-        print("\n" + "=" * 80)
-        print("STARTING BACKTEST")
-        print(f"Period: {self.start_date} to {self.end_date}")
-        print("=" * 80)
-
-        # Kite Connect ONLY — actual NIFTY futures data
+    # ----------------------------------------------------------------
+    def _load_df(self):
+        if self.mock:
+            df = generate_synthetic_futures()
+            return df[self.start_date:self.end_date] if (self.start_date and self.end_date) else df
+        # Live path: real NIFTY futures 3m from Kite
         from kite_fetcher import fetch_3m_data as kite_fetch
-        from datetime import datetime
-        start = datetime.strptime(self.start_date, "%Y-%m-%d")
-        end = datetime.strptime(self.end_date, "%Y-%m-%d")
+        from datetime import datetime as _dt
+        start = _dt.strptime(self.start_date, "%Y-%m-%d")
+        end = _dt.strptime(self.end_date, "%Y-%m-%d")
         days = (end - start).days
-
-        df_3m = kite_fetch(lookback_days=max(days + 2, 5))
-        if df_3m is None or len(df_3m) < 20:
+        df = kite_fetch(lookback_days=max(days + 2, 5))
+        if df is None or len(df) < 20:
             print("Error: Kite returned no data")
             return None
+        return df[self.start_date:self.end_date]
 
-        # Filter to backtest date range
-        df_3m = df_3m[self.start_date:self.end_date]
-        df_3m = Indicators.add_all_indicators(df_3m, "3m")
-        spot_close = df_3m['close'].copy()
-        print(f"Using Kite NIFTY futures data: {len(df_3m)} candles")
-        print(f"Range: {df_3m.index[0]} to {df_3m.index[-1]}")
+    # ----------------------------------------------------------------
+    def _run_on_df(self, df_3m, mult=None, vwma_len=None):
+        if df_3m is None or len(df_3m) < 20:
+            return None
+        df = Indicators.add_all_indicators(df_3m.copy(), "3m")
+        if mult is not None:
+            st, direction = Indicators.calculate_supertrend(df, config.SUPERTREND_PERIOD, mult)
+            df["3m_supertrend"] = st
+            df["3m_supertrend_direction"] = direction
+        if vwma_len is not None:
+            df["3m_vwma"] = Indicators.calculate_vwma(df, vwma_len)
 
-        print(f"\nRunning backtest...\n")
+        lot = config.LOT_SIZE
+        # IV series (realized vol of underlying), floored/capped
+        ret = df["close"].pct_change().fillna(0.0)
+        if config.IV_METHOD == "fixed":
+            iv_series = pd.Series(config.IV_FIXED, index=df.index)
+        else:
+            iv_series = (ret.rolling(config.IV_WINDOW).std() * np.sqrt(252))
+            iv_series = iv_series.clip(config.IV_FLOOR, config.IV_CAP).fillna(config.IV_FLOOR)
+        # time-to-expiry per bar (theta)
+        expiry_dt = df.index[0] + timedelta(days=config.DAYS_TO_EXPIRY)
+        days_left = (expiry_dt - df.index).days
+        T_series = np.maximum(1, days_left) / 252.0
 
-        for i in range(len(df_3m)):
-            current_candle = df_3m.iloc[i]
-            current_time = current_candle.name
+        # regime baseline for z-score filter
+        iv_mean = iv_series.mean()
+        iv_std = iv_series.std() or 1e-6
 
-            # Daily reset
-            day = current_time.date() if hasattr(current_time, 'date') else current_time
-            if day != self.current_date:
-                self.current_date = day
-                self.trades_today = 0
-                self.losses_today = 0
-                self.daily_stopped = False
+        trades = []
+        open_trade = None
+        trades_today = 0
+        losses_today = 0
+        daily_stopped = False
+        current_date = None
 
-            # Market hours filter
-            if not self._in_market_hours(current_time):
+        for i in range(len(df)):
+            row = df.iloc[i]
+            t = df.index[i]
+            day = t.date()
+            if day != current_date:
+                current_date = day
+                trades_today = 0
+                losses_today = 0
+                daily_stopped = False
+
+            if not self._in_market_hours(t):
                 continue
 
-            close = float(current_candle['close'])
+            close = float(row["close"])
+            iv_i = float(iv_series.iloc[i])
+            T_i = float(T_series[i])
+            opt_type = None
 
-            # --- Manage open trade ---
-            if self.open_trade:
-                opt_type = 'CALL' if self.open_trade.signal['type'] == 'BUY_CALL' else 'PUT'
-                current_option_price = simulate_option_price(
-                    close, self.open_trade.signal['recommended_strike'], opt_type
-                )
-
-                # Check stoploss: spot hits Supertrend level
-                st_level = self.open_trade.signal['supertrend_level']
+            # ---- manage open trade ----
+            if open_trade:
+                opt_type = "CALL" if open_trade.signal["type"] == "BUY_CALL" else "PUT"
+                cur_prem = price_option(close, open_trade.signal["recommended_strike"], T_i, iv_i, opt_type)
+                st_level = open_trade.signal["supertrend_level"]
                 exit_reason = None
-                if self.open_trade.signal['type'] == 'BUY_CALL' and close <= st_level:
+                if open_trade.signal["type"] == "BUY_CALL" and close <= st_level:
                     exit_reason = "Supertrend Stoploss"
-                elif self.open_trade.signal['type'] == 'BUY_PUT' and close >= st_level:
+                elif open_trade.signal["type"] == "BUY_PUT" and close >= st_level:
                     exit_reason = "Supertrend Stoploss"
-
-                # Check target 1:2
-                if not exit_reason and current_option_price >= self.open_trade.target_1_2:
+                if not exit_reason and cur_prem >= open_trade.target_1_2:
                     exit_reason = "Target 1:2 RR"
-
-                # Hybrid: partial at 1:1
                 if (not exit_reason and config.HYBRID_EXIT_ENABLED
-                        and not self.open_trade.partial_booked
-                        and current_option_price >= self.open_trade.target_1_1):
-                    self.open_trade.close(current_time, current_option_price,
-                                          "1:1 RR", partial=True)
-                    print(f"  PARTIAL 1:1 at {current_time}")
-
+                        and not open_trade.partial_booked
+                        and cur_prem >= open_trade.target_1_1):
+                    open_trade.partial_pnl = (cur_prem - open_trade.entry_premium) * 0.5 * lot
+                    open_trade.partial_booked = True
                 if exit_reason:
-                    self.open_trade.close(current_time, current_option_price, exit_reason)
-                    is_loss = self.open_trade.pnl < 0
-                    self.trades.append(self.open_trade)
-                    self.trades_today += 1
-                    if is_loss:
-                        self.losses_today += 1
-                    self.open_trade = None
-
-                    if (self.trades_today >= config.MAX_TRADES_PER_DAY or
-                            self.losses_today >= config.MAX_LOSSES_PER_DAY):
-                        self.daily_stopped = True
+                    cost, _ = option_costs(open_trade.entry_premium, cur_prem, lot)
+                    pnl_full = (cur_prem - open_trade.entry_premium) * lot
+                    pnl = open_trade.partial_pnl + pnl_full * 0.5 - cost
+                    open_trade.exit_time = t
+                    open_trade.exit_premium = cur_prem
+                    open_trade.exit_reason = exit_reason
+                    open_trade.pnl = pnl
+                    open_trade.costs = cost
+                    open_trade.status = "CLOSED"
+                    trades.append(open_trade)
+                    trades_today += 1
+                    if pnl < 0:
+                        losses_today += 1
+                    open_trade = None
+                    if (trades_today >= config.MAX_TRADES_PER_DAY
+                            or losses_today >= config.MAX_LOSSES_PER_DAY):
+                        daily_stopped = True
                 continue
 
-            # --- Look for new entry ---
-            if self.daily_stopped:
+            # ---- look for new entry ----
+            if daily_stopped:
                 continue
 
-            spot_price = float(spot_close.iloc[i]) if current_time in spot_close.index else close
-            signal = self.strategy.generate_signal(
-                current_candle, df_3m, i, spot_price=spot_price
-            )
-            if signal:
-                self.signals_log.append(signal)
-                opt_type = 'CALL' if signal['type'] == 'BUY_CALL' else 'PUT'
-                entry_price = simulate_option_price(
-                    spot_price, signal['recommended_strike'], opt_type
-                )
-                st_level = signal['supertrend_level']
-                sl_premium = simulate_option_price(st_level, signal['recommended_strike'], opt_type)
-                risk = abs(entry_price - sl_premium)
-                if risk <= 0:
+            # Regime filter (gated)
+            if config.REGIME_FILTER_ENABLED:
+                z = (iv_i - iv_mean) / iv_std
+                if z > config.REGIME_VOL_ZSCORE:
                     continue
-                target_1_1 = entry_price + risk
-                target_1_2 = entry_price + 2 * risk
 
-                trade = Trade(signal, current_time, entry_price,
-                              sl_premium, target_1_1, target_1_2)
-                self.open_trade = trade
+            spot = close
+            signal = self.strategy.generate_signal(row, df, i, spot_price=spot)
+            if not signal:
+                continue
 
-        # Close any open trade at end
-        if self.open_trade:
-            last = df_3m.iloc[-1]
-            close = float(last['close'])
-            opt_type = 'CALL' if self.open_trade.signal['type'] == 'BUY_CALL' else 'PUT'
-            ep = simulate_option_price(close, self.open_trade.signal['recommended_strike'], opt_type)
-            self.open_trade.close(last.name, ep, "End of Backtest")
-            self.trades.append(self.open_trade)
-            self.open_trade = None
+            opt_type = "CALL" if signal["type"] == "BUY_CALL" else "PUT"
+            entry_prem = price_option(spot, signal["recommended_strike"], T_i, iv_i, opt_type)
+            sl_prem = price_option(signal["supertrend_level"], signal["recommended_strike"], T_i, iv_i, opt_type)
+            risk = entry_prem - sl_prem
+            if risk <= 0:
+                continue
+            # Liquidity filter (gated)
+            if config.LIQUIDITY_FILTER_ENABLED and entry_prem < config.MIN_PREMIUM:
+                continue
+            target_1_1 = entry_prem + risk
+            target_1_2 = entry_prem + 2 * risk
+            open_trade = Trade(signal, t, entry_prem, sl_prem, target_1_1, target_1_2, iv_i, T_i)
 
-        return self.calculate_results()
+        # close any open trade at end
+        if open_trade:
+            last = df.iloc[-1]
+            close = float(last["close"])
+            iv_i = float(iv_series.iloc[-1]); T_i = float(T_series[-1])
+            opt_type = "CALL" if open_trade.signal["type"] == "BUY_CALL" else "PUT"
+            ep = price_option(close, open_trade.signal["recommended_strike"], T_i, iv_i, opt_type)
+            cost, _ = option_costs(open_trade.entry_premium, ep, lot)
+            pnl_full = (ep - open_trade.entry_premium) * lot
+            pnl = open_trade.partial_pnl + pnl_full * 0.5 - cost
+            open_trade.exit_time = df.index[-1]
+            open_trade.exit_premium = ep
+            open_trade.exit_reason = "End of Backtest"
+            open_trade.pnl = pnl
+            open_trade.costs = cost
+            open_trade.status = "CLOSED"
+            trades.append(open_trade)
 
+        return self._metrics(trades)
+
+    # ----------------------------------------------------------------
+    def _metrics(self, trades):
+        if not trades:
+            return {"trades": [], "num_trades": 0, "equity": [], "expectancy": 0.0,
+                    "win_rate": 0.0, "profit_factor": 0.0, "max_dd": 0.0,
+                    "total_pnl": 0.0, "avg_win": 0.0, "avg_loss": 0.0}
+        pnls = np.array([t.pnl for t in trades])
+        equity = np.cumsum(pnls)
+        peak = np.maximum.accumulate(equity)
+        dd = equity - peak
+        max_dd = float(dd.min()) if len(dd) else 0.0
+        wins = pnls[pnls > 0]
+        losses = pnls[pnls <= 0]
+        win_rate = len(wins) / len(pnls) * 100
+        pf = float(wins.sum() / -losses.sum()) if len(losses) and losses.sum() < 0 else (float("inf") if wins.sum() > 0 else 0.0)
+        return {
+            "trades": trades,
+            "num_trades": len(pnls),
+            "equity": equity.tolist(),
+            "expectancy": float(pnls.mean()),
+            "win_rate": win_rate,
+            "profit_factor": pf,
+            "max_dd": max_dd,
+            "total_pnl": float(pnls.sum()),
+            "avg_win": float(wins.mean()) if len(wins) else 0.0,
+            "avg_loss": float(losses.mean()) if len(losses) else 0.0,
+            "monte_carlo": self._monte_carlo(pnls),
+        }
+
+    # ----------------------------------------------------------------
+    def _monte_carlo(self, pnls, runs=None):
+        runs = runs or config.MONTE_CARLO_RUNS
+        n = len(pnls)
+        if n == 0:
+            return {}
+        rng = np.random.default_rng(7)
+        totals = np.empty(runs)
+        dds = np.empty(runs)
+        for r in range(runs):
+            sample = rng.choice(pnls, size=n, replace=True)
+            eq = np.cumsum(sample)
+            peak = np.maximum.accumulate(eq)
+            dds[r] = (eq - peak).min()
+            totals[r] = eq[-1]
+        exps = totals / n
+        return {
+            "prob_profitable": float((totals > 0).mean() * 100),
+            "expectancy_p5": float(np.percentile(exps, 5)),
+            "expectancy_p95": float(np.percentile(exps, 95)),
+            "worst_dd_p5": float(np.percentile(dds, 5)),
+        }
+
+    # ----------------------------------------------------------------
     def _in_market_hours(self, dt):
-        if hasattr(dt, 'tzinfo') and dt.tzinfo is not None:
-            from datetime import timezone, timedelta
-            ist = timezone(timedelta(hours=5, minutes=30))
-            dt = dt.astimezone(ist)
-        t = dt.time() if hasattr(dt, 'time') else None
+        if hasattr(dt, "tzinfo") and dt.tzinfo is not None:
+            from datetime import timezone, timedelta as td
+            dt = dt.astimezone(timezone(td(hours=5, minutes=30)))
+        t = dt.time() if hasattr(dt, "time") else None
         if t is None:
             return False
-        from datetime import time as dtime
-        market_open = dtime(9, 45)
-        market_close = dtime(15, 30)
-        lunch_start = dtime(12, 30)
-        lunch_end = dtime(14, 0)
-        if market_open <= t <= market_close:
-            if lunch_start <= t <= lunch_end:
+        mo, mc = dtime(9, 45), dtime(15, 30)
+        lunch_s, lunch_e = dtime(12, 30), dtime(14, 0)
+        if mo <= t <= mc:
+            if lunch_s <= t <= lunch_e:
                 return False
             return True
         return False
 
-    def calculate_results(self):
-        if not self.trades:
-            print("\nNo trades executed")
-            return None
-
-        print(f"\n{'=' * 80}")
-        print("BACKTEST RESULTS")
+    # ----------------------------------------------------------------
+    def run_backtest(self):
+        print("\n" + "=" * 80)
+        print("BACKTEST (v2 — BS pricing + costs)")
+        print(f"Period: {self.start_date} to {self.end_date}  mock={self.mock}")
         print("=" * 80)
+        df = self._load_df()
+        res = self._run_on_df(df)
+        if res is None or res["num_trades"] == 0:
+            print("No trades executed.")
+            return res
+        self._print(res, "FULL SAMPLE")
+        return res
 
-        total = len(self.trades)
-        wins = [t for t in self.trades if t.pnl > 0]
-        losses = [t for t in self.trades if t.pnl <= 0]
-        win_rate = len(wins) / total * 100
-        total_pnl = sum(t.pnl for t in self.trades)
-        avg_win = np.mean([t.pnl for t in wins]) if wins else 0
-        avg_loss = np.mean([t.pnl for t in losses]) if losses else 0
+    def walk_forward(self):
+        df = self._load_df()
+        if df is None:
+            return
+        folds = config.WALK_FORWARD_FOLDS
+        print(f"\n{'=' * 80}\nWALK-FORWARD (rolling out-of-sample, {folds} folds)\n{'=' * 80}")
+        # split by date into contiguous folds
+        dates = df.index
+        boundaries = [dates[int(k * len(dates) / folds)] for k in range(1, folds)]
+        prev = dates[0]
+        for f in range(folds):
+            end = boundaries[f] if f < folds - 1 else dates[-1]
+            fold_df = df.loc[(df.index >= prev) & (df.index <= end)]
+            res = self._run_on_df(fold_df)
+            prev = end
+            tag = f"FOLD {f+1}"
+            if res and res["num_trades"]:
+                self._print(res, tag)
+            else:
+                print(f"  {tag}: no trades")
 
-        print(f"Total Trades: {total}")
-        print(f"Winning: {len(wins)} | Losing: {len(losses)}")
-        print(f"Win Rate: {win_rate:.1f}%")
-        print(f"Total P&L: ₹{total_pnl:,.2f}")
-        print(f"Avg Win: ₹{avg_win:,.2f} | Avg Loss: ₹{avg_loss:,.2f}")
-        print("=" * 80)
+    def parameter_sensitivity(self):
+        df = self._load_df()
+        if df is None:
+            return
+        print(f"\n{'=' * 80}\nPARAMETER SENSITIVITY (overfit check)\n{'=' * 80}")
+        print(f"  {'mult':>5} {'vwma':>5} {'trades':>6} {'PF':>7} {'exp':>10} {'maxDD':>10}")
+        for mult in config.PARAM_SWEEP_MULT:
+            for vwma in config.PARAM_SWEEP_VWMA:
+                res = self._run_on_df(df, mult=mult, vwma_len=vwma)
+                if res and res["num_trades"]:
+                    pf = res["profit_factor"]
+                    pf_s = f"{pf:.2f}" if np.isfinite(pf) else "inf"
+                    print(f"  {mult:>5} {vwma:>5} {res['num_trades']:>6} {pf_s:>7} "
+                          f"{res['expectancy']:>10.1f} {res['max_dd']:>10.1f}")
+                else:
+                    print(f"  {mult:>5} {vwma:>5} {'0':>6} {'-':>7} {'-':>10} {'-':>10}")
 
-        call_trades = [t for t in self.trades if t.signal['type'] == 'BUY_CALL']
-        put_trades = [t for t in self.trades if t.signal['type'] == 'BUY_PUT']
-        call_wins = len([t for t in call_trades if t.pnl > 0])
-        put_wins = len([t for t in put_trades if t.pnl > 0])
-
-        return {
-            'total_trades': total,
-            'wins': len(wins),
-            'losses': len(losses),
-            'win_rate': win_rate,
-            'total_pnl': total_pnl,
-            'avg_win': avg_win,
-            'avg_loss': avg_loss,
-            'call_trades': len(call_trades),
-            'put_trades': len(put_trades),
-            'call_win_rate': call_wins / len(call_trades) * 100 if call_trades else 0,
-            'put_win_rate': put_wins / len(put_trades) * 100 if put_trades else 0,
-            'trades': self.trades,
-            'signals': self.signals_log,
-        }
+    # ----------------------------------------------------------------
+    def _print(self, res, tag):
+        pf = res["profit_factor"]
+        pf_s = f"{pf:.2f}" if np.isfinite(pf) else "inf"
+        mc = res.get("monte_carlo", {})
+        print(f"\n--- {tag} ---")
+        print(f"  Trades         : {res['num_trades']}")
+        print(f"  Win rate       : {res['win_rate']:.1f}%")
+        print(f"  Expectancy/trade: ₹{res['expectancy']:,.1f}")
+        print(f"  Total P&L      : ₹{res['total_pnl']:,.1f}")
+        print(f"  Avg win / loss : ₹{res['avg_win']:,.1f} / ₹{res['avg_loss']:,.1f}")
+        print(f"  Profit factor  : {pf_s}")
+        print(f"  Max drawdown   : ₹{res['max_dd']:,.1f}")
+        if mc:
+            print(f"  Monte Carlo    : P(profitable)={mc['prob_profitable']:.0f}%  "
+                  f"exp 5–95% ₹{mc['expectancy_p5']:,.0f}–{mc['expectancy_p95']:,.0f}  "
+                  f"worstDD 5% ₹{mc['worst_dd_p5']:,.0f}")
 
 
 if __name__ == "__main__":
-    bt = Backtester()
-    results = bt.run_backtest()
-    if results and results['trades']:
-        print("\nSAMPLE TRADES:")
-        for i, t in enumerate(results['trades'][:5], 1):
-            print(f"  #{i} {t.signal['type']} {t.signal['strike_label']} "
-                  f"| Entry ₹{t.entry_price:.2f} → Exit ₹{t.exit_price:.2f} "
-                  f"| P&L ₹{t.pnl:+.2f} ({t.exit_reason})")
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--mock", action="store_true")
+    ap.add_argument("--walkforward", action="store_true")
+    ap.add_argument("--sensitivity", action="store_true")
+    ap.add_argument("--start", default=None)
+    ap.add_argument("--end", default=None)
+    args = ap.parse_args()
+
+    bt = Backtester(start_date=args.start, end_date=args.end, mock=args.mock)
+    bt.run_backtest()
+    if args.walkforward:
+        bt.walk_forward()
+    if args.sensitivity:
+        bt.parameter_sensitivity()

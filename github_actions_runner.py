@@ -48,14 +48,15 @@ NO_ENTRY_AFTER = dtime(*map(int, config.NO_ENTRY_AFTER.split(':'))) if config.NO
 # Helpers
 # ======================================================================
 
-def simulate_option_price(spot_price, strike, option_type):
-    """Simplified option premium model (mirrors backtester)."""
-    if option_type == 'CALL':
-        intrinsic = max(0, spot_price - strike)
-    else:
-        intrinsic = max(0, strike - spot_price)
-    time_value = intrinsic * 0.3 if intrinsic > 0 else spot_price * 0.01
-    return intrinsic + time_value
+def live_option_premium(spot_price, strike, option_type):
+    """Real Black-Scholes premium for live alerts.
+
+    IV proxy = config.IV_FIXED; T = weeks-to-expiry. For production, feed
+    realized/option IV and the exact time-to-expiry instead.
+    """
+    from option_pricer import price_option
+    T = config.DAYS_TO_EXPIRY / 252.0
+    return price_option(spot_price, strike, T, config.IV_FIXED, option_type)
 
 
 def fetch_3m_data(lookback_days=5):
@@ -154,6 +155,11 @@ def send_entry_alert(notifier, signal, entry_price, stoploss_premium,
     lot = config.LOT_SIZE
     emoji = "🟢" if signal['type'] == 'BUY_CALL' else "🔴"
     signal_type = "BUY CALL" if signal['type'] == 'BUY_CALL' else "BUY PUT"
+    try:
+        from kite_fetcher import format_weekly_symbol, next_weekly_expiry
+        sym = format_weekly_symbol(next_weekly_expiry(), signal['recommended_strike'], signal['type'])
+    except Exception:
+        sym = signal['strike_label']
     risk = entry_price - stoploss_premium if signal['type'] == 'BUY_CALL' \
         else stoploss_premium - entry_price
     cost = entry_price * lot
@@ -161,6 +167,7 @@ def send_entry_alert(notifier, signal, entry_price, stoploss_premium,
     msg = (
         f"{emoji} <b>{signal_type} — ENTRY</b>\n\n"
         f"🎯 <b>Strike:</b> {signal['strike_label']} (ITM)\n"
+        f"🎫 <b>Contract:</b> {sym}\n"
         f"💰 <b>LTP:</b> ₹{entry_price:.2f} × {lot} = ₹{cost:,.0f}\n"
         f"📍 <b>Spot:</b> {signal['spot_price']:,.2f}\n"
         f"🛑 <b>SL:</b> ₹{stoploss_premium:.2f} (Risk ₹{risk * lot:,.0f})\n\n"
@@ -169,7 +176,7 @@ def send_entry_alert(notifier, signal, entry_price, stoploss_premium,
         f"📋 {signal['reason'].replace(' | ', chr(10) + '✓ ')}\n\n"
         f"🕐 <b>{now.strftime('%I:%M %p')}</b>"
     )
-    notifier.send_message(msg)
+    notifier.send_message(msg + f"\n\n<i>{config.DISCLAIMER}</i>")
 
 
 def send_partial_exit_alert(notifier, position, current_price, now):
@@ -186,7 +193,7 @@ def send_partial_exit_alert(notifier, position, current_price, now):
         f"📝 Trailing remaining 50% for 1:2 target\n"
         f"🕐 <b>{now.strftime('%I:%M %p')}</b>"
     )
-    notifier.send_message(msg)
+    notifier.send_message(msg + f"\n\n<i>{config.DISCLAIMER}</i>")
 
 
 def send_full_exit_alert(notifier, position, current_price, reason, now):
@@ -204,7 +211,7 @@ def send_full_exit_alert(notifier, position, current_price, reason, now):
         f"📝 <b>Reason:</b> {reason}\n"
         f"🕐 <b>{now.strftime('%I:%M %p')}</b>"
     )
-    notifier.send_message(msg)
+    notifier.send_message(msg + f"\n\n<i>{config.DISCLAIMER}</i>")
 
 
 def send_daily_stop_alert(notifier, trades, losses, now):
@@ -217,7 +224,7 @@ def send_daily_stop_alert(notifier, trades, losses, now):
         f"❌ Losses today: {losses}\n\n"
         f"🕐 <b>{now.strftime('%I:%M %p')}</b>"
     )
-    notifier.send_message(msg)
+    notifier.send_message(msg + f"\n\n<i>{config.DISCLAIMER}</i>")
 
 
 # ======================================================================
@@ -328,7 +335,7 @@ def main():
         else:
             msg = f"📊 <b>SCAN — {data_date} — No signals</b>\n\nThe strategy found no entry setups (pullback to VWMA-20 + Supertrend confirmation)."
 
-        notifier.send_message(msg)
+        notifier.send_message(msg + f"\n\n<i>{config.DISCLAIMER}</i>")
         print(f"Scan complete: {len(signals)} signals")
         return
 
@@ -376,7 +383,7 @@ def main():
     position = state.get('open_position')
     if position:
         opt_type = 'CALL' if position['type'] == 'BUY_CALL' else 'PUT'
-        current_price = simulate_option_price(spot, position['strike'], opt_type)
+        current_price = live_option_premium(spot, position['strike'], opt_type)
 
         reason, partial = evaluate_exit(position, latest3, current_price, today, now)
 
@@ -408,11 +415,11 @@ def main():
         signal = strategy.generate_signal(latest3, df3, current_idx, spot_price=spot)
         if signal:
             opt_type = 'CALL' if signal['type'] == 'BUY_CALL' else 'PUT'
-            entry_price = simulate_option_price(spot, signal['recommended_strike'], opt_type)
+            entry_price = live_option_premium(spot, signal['recommended_strike'], opt_type)
             st_level = signal['supertrend_level']
 
             # Compute stoploss and targets
-            sl_premium = simulate_option_price(st_level, signal['recommended_strike'], opt_type)
+            sl_premium = live_option_premium(st_level, signal['recommended_strike'], opt_type)
             risk = abs(entry_price - sl_premium)
             if risk <= 0:
                 logger.warning("Risk is zero — skipping entry")

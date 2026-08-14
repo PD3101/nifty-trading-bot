@@ -330,7 +330,7 @@ def main():
                 data = json.load(f)
 
             # Reconstruct Trade-like objects for the charts
-            from backtester import Trade, simulate_option_price
+            from backtester import Trade
             from strategy import StrategyEngine
 
             trades = []

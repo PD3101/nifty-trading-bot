@@ -21,6 +21,8 @@ from datetime import datetime, timedelta
 import pandas as pd
 import pytz
 
+import config
+
 logger = logging.getLogger('kite_fetcher')
 
 IST = pytz.timezone('Asia/Kolkata')
@@ -123,6 +125,37 @@ def get_nearest_nifty_fut(kite):
     # Nearest expiry first
     nifty_fut.sort(key=lambda x: x['expiry'])
     return nifty_fut[0]
+
+
+def format_weekly_symbol(expiry_date, strike, option_type):
+    """NSE weekly option tradingsymbol, e.g. NIFTY21AUG24800CE."""
+    mon = expiry_date.strftime('%d%b').upper()
+    suffix = 'CE' if option_type == 'CALL' else 'PE'
+    return f"NIFTY{mon}{int(strike)}{suffix}"
+
+
+def next_weekly_expiry(from_date=None):
+    """Next date whose weekday == config.EXPIRY_DAY (⚠️ verify vs NSE calendar)."""
+    from_date = from_date or datetime.now(IST).date()
+    d = from_date
+    for _ in range(7):
+        if d.weekday() == config.EXPIRY_DAY:
+            return d
+        d += timedelta(days=1)
+    return from_date
+
+
+def resolve_weekly_option(kite, expiry_date, strike, option_type):
+    """Return (tradingsymbol, instrument_token) for the NIFTY weekly option, or (sym, None)."""
+    sym = format_weekly_symbol(expiry_date, strike, option_type)
+    try:
+        instruments = kite.instruments("NFO")
+        for i in instruments:
+            if i.get('tradingsymbol') == sym and i.get('exchange') == 'NFO':
+                return i['tradingsymbol'], i['instrument_token']
+    except Exception as e:
+        logger.error(f"Option resolve failed: {e}")
+    return sym, None
 
 
 def fetch_3m_data(lookback_days=5):
