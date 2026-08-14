@@ -17,6 +17,10 @@ on:
         description: 'Backtest/export end date (YYYY-MM-DD)'
         required: false
         default: ''
+      htf_off:
+        description: 'Disable 15m HTF trend gate (measures HTF lift)'
+        required: false
+        default: 'false'
 
 concurrency:
   group: nifty-strategy-optimize
@@ -56,6 +60,7 @@ jobs:
           EXTRA=""
           if [ -n "${{ github.event.inputs.start }}" ]; then EXTRA="$EXTRA --export-start ${{ github.event.inputs.start }}"; fi
           if [ -n "${{ github.event.inputs.end }}" ]; then EXTRA="$EXTRA --export-end ${{ github.event.inputs.end }}"; fi
+          if [ "${{ github.event.inputs.htf_off }}" = "true" ]; then EXTRA="$EXTRA --htf-off"; fi
           python strategy_optimizer.py --auto --notify $EXTRA
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
