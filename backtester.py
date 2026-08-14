@@ -227,7 +227,8 @@ class Backtester:
         if config.HTF_TREND_ENABLED and htf_df is not None and len(htf_df) >= 2:
             hst, hdir = Indicators.calculate_supertrend(
                 htf_df, config.SUPERTREND_PERIOD, config.SUPERTREND_MULTIPLIER)
-            hdir_series = pd.Series(hdir, index=htf_df.index)
+            # asof() requires a sorted index; sort to be robust to load order.
+            hdir_series = pd.Series(hdir, index=htf_df.index).sort_index()
 
         # NIFTY 50 SPOT index series — drives strike selection + timing. When
         # absent (mock / fetch failed), the futures close is used as the proxy.
