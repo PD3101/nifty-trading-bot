@@ -19,6 +19,8 @@ Run:
     python backtester.py --mock --sensitivity
 """
 
+import sys
+
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta, time as dtime
@@ -453,17 +455,61 @@ class Backtester:
                   f"worstDD 5% ₹{mc['worst_dd_p5']:,.0f}")
 
 
+def check_connectivity():
+    """Open Kite, confirm auth, print nearest FUT contract + lot, and verify
+    weekly-option resolution. Returns 0 on success, 1 on failure."""
+    from kite_fetcher import (get_kite_client, get_nearest_nifty_fut,
+                              format_weekly_symbol, next_weekly_expiry,
+                              resolve_weekly_option)
+    try:
+        kite = get_kite_client()
+        user = kite.profile().get('user_name', 'unknown')
+        print(f"✅ Connected to Kite as: {user}")
+    except Exception as e:
+        print(f"❌ Kite connection FAILED: {e}")
+        return 1
+
+    try:
+        fut = get_nearest_nifty_fut(kite)
+        print(f"📈 Nearest NIFTY FUT: {fut['tradingsymbol']} "
+              f"(expiry {fut['expiry']}, lot_size={fut['lot_size']})")
+        print(f"   config.LOT_SIZE = {config.LOT_SIZE} "
+              f"({'OK' if fut['lot_size'] == config.LOT_SIZE else '⚠️ MISMATCH — fix config.LOT_SIZE'})")
+    except Exception as e:
+        print(f"❌ Could not resolve NIFTY FUT contract: {e}")
+        return 1
+
+    try:
+        expiry = next_weekly_expiry()
+        for otype in ('CALL', 'PUT'):
+            sym = format_weekly_symbol(expiry, 24000, otype)
+            s, tok = resolve_weekly_option(kite, expiry, 24000, otype)
+            print(f"🎫 {otype} sample {sym}: token={'resolved' if tok else 'NONE'}")
+        print(f"🗓 Next weekly expiry (EXPIRY_DAY={config.EXPIRY_DAY}): {expiry}")
+    except Exception as e:
+        print(f"❌ Option resolution check failed: {e}")
+        return 1
+
+    print("✅ Connectivity + contract resolution OK")
+    return 0
+
+
 if __name__ == "__main__":
     import argparse
     ap = argparse.ArgumentParser()
     ap.add_argument("--mock", action="store_true")
     ap.add_argument("--real-options", action="store_true",
                     help="Price trades from real Kite option historical data (needs creds + historical API)")
+    ap.add_argument("--check-connectivity", action="store_true",
+                    help="Verify Kite auth + contract resolution, then exit")
     ap.add_argument("--walkforward", action="store_true")
     ap.add_argument("--sensitivity", action="store_true")
     ap.add_argument("--start", default=None)
     ap.add_argument("--end", default=None)
     args = ap.parse_args()
+
+    if args.check_connectivity:
+        sys.exit(check_connectivity())
 
     bt = Backtester(start_date=args.start, end_date=args.end, mock=args.mock,
                     real_options=args.real_options)
