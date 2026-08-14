@@ -95,8 +95,16 @@ PARTIAL_BOOK_PERCENT = 50     # Book this % at 1:1
 
 MAX_POSITIONS = 1
 CAPITAL_PER_TRADE = 50000     # INR per trade
-POSITION_SIZE_LOTS = 1        # 1 lot = 65 qty (NIFTY)
-LOT_SIZE = 65                 # ⚠️ VERIFY: NSE revised NIFTY lot size (recently 75). Parametrize before live use.
+POSITION_SIZE_LOTS = 1        # 1 lot
+# ⚠️ VERIFY vs NSE circular: NIFTY 50 futures lot size was 50, revised to 75
+# for contracts introduced from Nov 2024. As of 2026 it is 75. If trading an
+# older/expired series, confirm on the NSE contract note.
+LOT_SIZE = 75                 # NSE NIFTY 50 futures/options lot size (post-Nov-2024 = 75)
+
+# Hardening: refuse entries whose notional (LTP × lot) exceeds capital budget.
+CAPITAL_GUARD_ENABLED = True
+# After 1:1 partial booked, trail remaining 50% with a break-even stop (protect profit).
+BREAKEVEN_TRAIL_ENABLED = True
 
 MAX_TRADES_PER_DAY = 3        # Rule 12: max 2-3 trades/day
 MAX_LOSSES_PER_DAY = 2        # Rule 13: max 1-2 losses → STOP
@@ -116,7 +124,16 @@ GAP_THRESHOLD = 0.005         # 0.5% — informational only
 
 BACKTEST_START_DATE = "2026-08-01"
 BACKTEST_END_DATE = "2026-08-08"
-EXPIRY_DAY = 1                # ⚠️ VERIFY vs NSE 2026 expiry calendar (NIFTY weekly commonly Thursday=3). Tuesday assumed per user.
+# ⚠️ VERIFY vs NSE 2026 expiry calendar. NIFTY 50 WEEKLY options expire on
+# THURSDAY (weekday 3), NOT Tuesday. A Tuesday value resolves the wrong weekly
+# contract in the alert symbol. 0=Mon … 6=Sun.
+EXPIRY_DAY = 3                # Thursday — NSE NIFTY 50 weekly options expiry
+
+# Real option-data backtest (requires Kite historical API + credentials).
+# When True and not --mock, the backtester prices trades from actual option
+# historical premiums instead of the Black-Scholes proxy. Falls back to BS if
+# a premium is missing for a timestamp.
+REAL_OPTION_DATA = False
 
 # ============================================================================
 # OPTION PRICING (Black-Scholes — replaces toy intrinsic+0.3*intrinsic model)

@@ -212,6 +212,52 @@ def fetch_3m_data(lookback_days=5):
         return None
 
 
+def fetch_option_history(kite, instrument_token, from_date, to_date, interval='3minute'):
+    """Fetch historical 3m premium candles for an option instrument token.
+
+    Used by the backtester's REAL_OPTION_DATA path to price trades from actual
+    option premiums instead of a Black-Scholes proxy. Returns a DataFrame
+    indexed by IST timestamp with a 'close' (premium) column, or None on failure.
+    Requires Kite historical-data API access.
+    """
+    try:
+        candles = kite.historical_data(
+            instrument_token=instrument_token,
+            from_date=from_date.strftime('%Y-%m-%d') if hasattr(from_date, 'strftime') else from_date,
+            to_date=to_date.strftime('%Y-%m-%d') if hasattr(to_date, 'strftime') else to_date,
+            interval=interval,
+        )
+        if not candles:
+            return None
+        df = pd.DataFrame(candles)
+        df['date'] = pd.to_datetime(df['date'])
+        df.set_index('date', inplace=True)
+        df.index.name = None
+        df.columns = [c.lower() for c in df.columns]
+        if df.index.tz is None:
+            df.index = df.index.tz_localize('Asia/Kolkata')
+        else:
+            df.index = df.index.tz_convert('Asia/Kolkata')
+        return df[['close']].rename(columns={'close': 'premium'})
+    except Exception as e:
+        logger.error(f"Option history fetch failed (token={instrument_token}): {e}")
+        return None
+
+
+def quote_option_ltp(kite, instrument_token):
+    """Live last-price (LTP) for an option instrument via Kite quote API.
+
+    Returns a float premium, or None if the quote fails. Falls back to the
+    Black-Scholes estimate in the runner when None.
+    """
+    try:
+        q = kite.quote([f"NFO:{instrument_token}"])
+        return float(q[f"NFO:{instrument_token}"]["last_price"])
+    except Exception as e:
+        logger.warning(f"Option LTP quote failed (token={instrument_token}): {e}")
+        return None
+
+
 def refresh_token(api_key, api_secret):
     """
     Fully automated Kite token refresh using headless browser + TOTP.

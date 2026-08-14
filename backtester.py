@@ -92,11 +92,67 @@ class Trade:
 # Backtester
 # ============================================================================
 class Backtester:
-    def __init__(self, start_date=None, end_date=None, mock=False):
+    def __init__(self, start_date=None, end_date=None, mock=False, real_options=None):
         self.start_date = start_date or config.BACKTEST_START_DATE
         self.end_date = end_date or config.BACKTEST_END_DATE
         self.mock = mock
+        self.real_options = config.REAL_OPTION_DATA if real_options is None else real_options
         self.strategy = StrategyEngine()
+        self.kite = None
+        self.option_series_cache = {}   # key -> premium DataFrame | None
+        self._bt_start = None
+        self._bt_end = None
+
+    # ----------------------------------------------------------------
+    def _next_expiry(self, from_date):
+        """Next NSE weekly expiry on/after from_date (config.EXPIRY_DAY)."""
+        from datetime import date as _date
+        d = from_date
+        for _ in range(8):
+            if d.weekday() == config.EXPIRY_DAY:
+                return d
+            d += timedelta(days=1)
+        return from_date
+
+    def _resolve_option_series(self, opt_type, strike, expiry_date):
+        """Fetch + cache the historical premium series for one option contract."""
+        suffix = 'CE' if opt_type == 'CALL' else 'PE'
+        key = f"{int(strike)}{suffix}_{expiry_date.isoformat()}"
+        if key in self.option_series_cache:
+            return self.option_series_cache[key]
+        # Lazy Kite client (live path only)
+        if self.kite is None:
+            try:
+                from kite_fetcher import get_kite_client
+                self.kite = get_kite_client()
+            except Exception as e:
+                print(f"  [real-options] Kite client unavailable ({e}); using BS proxy.")
+                self.kite = False
+        if not self.kite:
+            self.option_series_cache[key] = None
+            return None
+        from kite_fetcher import resolve_weekly_option, fetch_option_history
+        sym, token = resolve_weekly_option(self.kite, expiry_date, strike, opt_type)
+        if not token:
+            print(f"  [real-options] could not resolve {sym}; using BS proxy.")
+            self.option_series_cache[key] = None
+            return None
+        series = fetch_option_history(self.kite, token, self._bt_start, self._bt_end)
+        self.option_series_cache[key] = series
+        if series is None:
+            print(f"  [real-options] no history for {sym}; using BS proxy.")
+        return series
+
+    def _premium(self, opt_type, strike, spot, T_i, iv_i, ts, real_options):
+        """Option premium: real historical if available, else Black-Scholes."""
+        if real_options and not self.mock:
+            expiry = self._next_expiry(ts.date())
+            series = self._resolve_option_series(opt_type, strike, expiry)
+            if series is not None and len(series):
+                val = series['premium'].asof(ts)
+                if val == val and val is not None:   # not NaN
+                    return float(val)
+        return price_option(spot, strike, T_i, iv_i, opt_type)
 
     # ----------------------------------------------------------------
     def _load_df(self):
@@ -116,9 +172,12 @@ class Backtester:
         return df[self.start_date:self.end_date]
 
     # ----------------------------------------------------------------
-    def _run_on_df(self, df_3m, mult=None, vwma_len=None):
+    def _run_on_df(self, df_3m, mult=None, vwma_len=None, real_options=None):
         if df_3m is None or len(df_3m) < 20:
             return None
+        real_options = self.real_options if real_options is None else real_options
+        self._bt_start = df_3m.index[0]
+        self._bt_end = df_3m.index[-1]
         df = Indicators.add_all_indicators(df_3m.copy(), "3m")
         if mult is not None:
             st, direction = Indicators.calculate_supertrend(df, config.SUPERTREND_PERIOD, mult)
@@ -172,7 +231,8 @@ class Backtester:
             # ---- manage open trade ----
             if open_trade:
                 opt_type = "CALL" if open_trade.signal["type"] == "BUY_CALL" else "PUT"
-                cur_prem = price_option(close, open_trade.signal["recommended_strike"], T_i, iv_i, opt_type)
+                cur_prem = self._premium(opt_type, open_trade.signal["recommended_strike"],
+                                         close, T_i, iv_i, t, real_options)
                 st_level = open_trade.signal["supertrend_level"]
                 exit_reason = None
                 if open_trade.signal["type"] == "BUY_CALL" and close <= st_level:
@@ -222,8 +282,8 @@ class Backtester:
                 continue
 
             opt_type = "CALL" if signal["type"] == "BUY_CALL" else "PUT"
-            entry_prem = price_option(spot, signal["recommended_strike"], T_i, iv_i, opt_type)
-            sl_prem = price_option(signal["supertrend_level"], signal["recommended_strike"], T_i, iv_i, opt_type)
+            entry_prem = self._premium(opt_type, signal["recommended_strike"], spot, T_i, iv_i, t, real_options)
+            sl_prem = self._premium(opt_type, signal["recommended_strike"], signal["supertrend_level"], T_i, iv_i, t, real_options)
             risk = entry_prem - sl_prem
             if risk <= 0:
                 continue
@@ -240,7 +300,7 @@ class Backtester:
             close = float(last["close"])
             iv_i = float(iv_series.iloc[-1]); T_i = float(T_series[-1])
             opt_type = "CALL" if open_trade.signal["type"] == "BUY_CALL" else "PUT"
-            ep = price_option(close, open_trade.signal["recommended_strike"], T_i, iv_i, opt_type)
+            ep = self._premium(opt_type, open_trade.signal["recommended_strike"], close, T_i, iv_i, df.index[-1], real_options)
             cost, _ = option_costs(open_trade.entry_premium, ep, lot)
             pnl_full = (ep - open_trade.entry_premium) * lot
             pnl = open_trade.partial_pnl + pnl_full * 0.5 - cost
@@ -397,13 +457,16 @@ if __name__ == "__main__":
     import argparse
     ap = argparse.ArgumentParser()
     ap.add_argument("--mock", action="store_true")
+    ap.add_argument("--real-options", action="store_true",
+                    help="Price trades from real Kite option historical data (needs creds + historical API)")
     ap.add_argument("--walkforward", action="store_true")
     ap.add_argument("--sensitivity", action="store_true")
     ap.add_argument("--start", default=None)
     ap.add_argument("--end", default=None)
     args = ap.parse_args()
 
-    bt = Backtester(start_date=args.start, end_date=args.end, mock=args.mock)
+    bt = Backtester(start_date=args.start, end_date=args.end, mock=args.mock,
+                    real_options=args.real_options)
     bt.run_backtest()
     if args.walkforward:
         bt.walk_forward()

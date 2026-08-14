@@ -48,12 +48,43 @@ NO_ENTRY_AFTER = dtime(*map(int, config.NO_ENTRY_AFTER.split(':'))) if config.NO
 # Helpers
 # ======================================================================
 
-def live_option_premium(spot_price, strike, option_type):
-    """Real Black-Scholes premium for live alerts.
+# Cache resolved option instrument tokens across runs (per weekly contract).
+_option_token_cache = {}
 
-    IV proxy = config.IV_FIXED; T = weeks-to-expiry. For production, feed
-    realized/option IV and the exact time-to-expiry instead.
+
+def _resolve_option_token(strike, option_type):
+    """Resolve (tradingsymbol, instrument_token); cached per symbol."""
+    from kite_fetcher import format_weekly_symbol, next_weekly_expiry
+    sym = format_weekly_symbol(next_weekly_expiry(), strike, option_type)
+    if sym in _option_token_cache:
+        return sym, _option_token_cache[sym]
+    try:
+        from kite_fetcher import get_kite_client, resolve_weekly_option
+        kite = get_kite_client()
+        s, tok = resolve_weekly_option(kite, next_weekly_expiry(), strike, option_type)
+        _option_token_cache[sym] = tok
+        return s, tok
+    except Exception:
+        _option_token_cache[sym] = None
+        return sym, None
+
+
+def live_option_premium(spot_price, strike, option_type):
+    """Live LTP for alerts when Kite quote is available; else BS fallback.
+
+    Prefers the real option last-price (kite.quote) so the alert shows actual
+    market LTP, not a model estimate. Falls back to Black-Scholes (fixed IV)
+    if the quote fails.
     """
+    sym, tok = _resolve_option_token(strike, option_type)
+    if tok:
+        from kite_fetcher import get_kite_client, quote_option_ltp
+        try:
+            ltp = quote_option_ltp(get_kite_client(), tok)
+            if ltp is not None:
+                return ltp
+        except Exception:
+            pass
     from option_pricer import price_option
     T = config.DAYS_TO_EXPIRY / 252.0
     return price_option(spot_price, strike, T, config.IV_FIXED, option_type)
@@ -133,6 +164,13 @@ def evaluate_exit(position, row_3m, current_option_price, today, now):
         return "Supertrend Stoploss", False
     if signal_type == 'BUY_PUT' and close >= st_level:
         return "Supertrend Stoploss", False
+
+    # --- Break-even trailing (after 1:1 partial booked) ---
+    # Protect the remaining 50%: once 1:1 is booked, exit at entry (cost) if
+    # price slips back, locking in the already-booked profit.
+    if (config.BREAKEVEN_TRAIL_ENABLED and position.get('partial_booked')
+            and current_option_price <= entry_price):
+        return "Trailing SL — Break Even", False
 
     # --- Target 1:2 ---
     if current_option_price >= target_1_2:
@@ -281,6 +319,14 @@ def main():
                 f"🍛 Lunch break: 12:30–2:00 PM"
             )
 
+    # --- Non-trading-day safety: idle on holidays/weekends unless a position
+    # is open (which still falls through to the exit logic to be settled). ---
+    trading_day = timing.is_weekday(now) and not timing.is_holiday(now)
+    if not trading_day and not state.get('open_position'):
+        logger.info("Non-trading day and no open position — idle")
+        save_state(state)
+        return
+
     # --- Scan-only mode: fetch today's data and report signals ---
     if os.getenv('SCAN_TODAY', '').lower() in ('1', 'true'):
         logger.info("Scan-only mode: fetching today's Kite data...")
@@ -425,6 +471,15 @@ def main():
                 logger.warning("Risk is zero — skipping entry")
                 save_state(state)
                 return
+
+            # Capital guard: never take a position whose notional exceeds budget.
+            cost = entry_price * config.LOT_SIZE
+            if config.CAPITAL_GUARD_ENABLED and cost > config.CAPITAL_PER_TRADE:
+                logger.warning(f"Capital guard: notional ₹{cost:,.0f} exceeds budget "
+                               f"₹{config.CAPITAL_PER_TRADE:,.0f}; skipping entry")
+                save_state(state)
+                return
+
             target_1_1 = entry_price + risk   # 1:1 RR
             target_1_2 = entry_price + 2 * risk  # 1:2 RR
 
