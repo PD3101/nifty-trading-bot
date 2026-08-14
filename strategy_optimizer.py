@@ -624,7 +624,15 @@ def main():
                     help='Strikes each side of spot to export (×50 pts)')
     ap.add_argument('--notify', action='store_true',
                     help='Post the analysis (§12–§21) to Telegram after running')
+    ap.add_argument('--htf-off', action='store_true',
+                    help='Disable the 15m HTF trend gate for this run (measures HTF lift)')
     args = ap.parse_args()
+
+    # --htf-off: isolate the higher-timeframe filter's contribution by turning
+    # it off for this run. Lets us compare CURRENT(HTF on) vs CURRENT(HTF off).
+    if args.htf_off:
+        config.HTF_TREND_ENABLED = False
+        print("⚠️  HTF trend gate DISABLED for this run (--htf-off).")
 
     # --- automated export ---
     if args.auto or args.export_csv:
