@@ -16,8 +16,10 @@ CRITICAL: numbers are ONLY meaningful on REAL Kite history. Run with
 GBM) this validates the *harness mechanics* only — DO NOT trade on mock numbers.
 
 Run:
-    python3 strategy_optimizer.py --mock            # proof-of-method
-    python3 strategy_optimizer.py --real-options    # real (needs creds)
+    python3 strategy_optimizer.py --mock                      # proof-of-method (synthetic)
+    python3 strategy_optimizer.py --real-options              # real Kite history (needs creds + hist API)
+    python3 strategy_optimizer.py --csv fut.csv               # cached futures CSV (no subscription)
+    python3 strategy_optimizer.py --csv fut.csv --opt-csv prem.csv   # + real option premiums
 """
 
 import sys
@@ -49,6 +51,55 @@ def add_trend_slope(df, col='3m_vwma', period=20):
     """Fractional slope of VWMA over `period` bars (trend strength)."""
     df['vwma_slope'] = df[col].diff(period) / df[col].shift(period)
     return df
+
+
+# ---------------------------------------------------------------------------
+# Cached-history loaders (run locally without Kite historical API)
+# ---------------------------------------------------------------------------
+def load_futures_csv(path):
+    """Load a cached NIFTY FUT 3m CSV. Columns: date,open,high,low,close,volume.
+
+    Any datetime column name is accepted; index is localized to IST.
+    """
+    df = pd.read_csv(path)
+    dtcol = next((c for c in ('date', 'timestamp', 'time', 'datetime') if c in df.columns), df.columns[0])
+    df[dtcol] = pd.to_datetime(df[dtcol])
+    df.set_index(dtcol, inplace=True)
+    df.index.name = None
+    keep = [c for c in ('open', 'high', 'low', 'close', 'volume') if c in df.columns]
+    df = df[keep].astype(float)
+    if df.index.tz is None:
+        df.index = df.index.tz_localize('Asia/Kolkata')
+    else:
+        df.index = df.index.tz_convert('Asia/Kolkata')
+    return df
+
+
+def build_opt_lookup(path):
+    """Build a real-premium lookup from an option CSV.
+
+    Columns: timestamp, strike, type (CALL/PUT), premium.
+    Returns callable(strike, opt_type, timestamp) -> premium | None.
+    When None, the harness falls back to Black-Scholes (as today).
+    """
+    od = pd.read_csv(path)
+    tscol = next((c for c in ('timestamp', 'date', 'time', 'datetime') if c in od.columns), od.columns[0])
+    od[tscol] = pd.to_datetime(od[tscol])
+    od['strike'] = od['strike'].astype(int)
+    od['type'] = od['type'].astype(str).str.upper()
+    lookup = {}
+    for (strike, typ), g in od.groupby(['strike', 'type']):
+        s = pd.Series(g['premium'].values, index=pd.DatetimeIndex(g[tscol].values))
+        s.index = s.index.tz_localize('Asia/Kolkata') if s.index.tz is None else s.index.tz_convert('Asia/Kolkata')
+        lookup[(int(strike), typ)] = s.sort_index()
+
+    def premium(strike, opt, ts):
+        s = lookup.get((int(strike), opt.upper()))
+        if s is None or len(s) == 0:
+            return None
+        v = s.asof(ts)
+        return float(v) if v == v else None
+    return premium
 
 
 # ---------------------------------------------------------------------------
@@ -108,9 +159,21 @@ def sl_level_for(spot, row, df, i, sig_type, method, atr_mult, swing_n):
 # ---------------------------------------------------------------------------
 # Core simulation
 # ---------------------------------------------------------------------------
-def simulate(df_3m, params, engine=None):
-    """Run one configured variant. Returns list of trade dicts + forensics."""
+def simulate(df_3m, params, opt_lookup=None, engine=None):
+    """Run one configured variant. Returns list of trade dicts + forensics.
+
+    opt_lookup: callable(strike, opt_type, timestamp) -> premium | None.
+    When it returns a premium, that real value is used; else Black-Scholes.
+    """
     engine = engine or StrategyEngine()
+
+    def get_prem(strike, opt, ts, spot_bs, T_i, iv_i):
+        if opt_lookup is not None:
+            rp = opt_lookup(strike, opt, ts)
+            if rp is not None:
+                return rp
+        return price_option(spot_bs, strike, T_i, iv_i, opt)
+
     df = Indicators.add_all_indicators(df_3m.copy(), "3m")
     add_atr(df)
     add_trend_slope(df)
@@ -155,7 +218,7 @@ def simulate(df_3m, params, engine=None):
         # ---- manage open ----
         if open_trade:
             opt = 'CALL' if open_trade['type'] == 'BUY_CALL' else 'PUT'
-            cur = price_option(close, open_trade['strike'], T_i, iv_i, opt)
+            cur = get_prem(open_trade['strike'], opt, t, close, T_i, iv_i)
             reason = None
             sl_level = open_trade['sl_level']
             if open_trade['type'] == 'BUY_CALL' and close <= sl_level:
@@ -198,9 +261,9 @@ def simulate(df_3m, params, engine=None):
 
         opt = 'CALL' if sig == 'BUY_CALL' else 'PUT'
         strike = engine.select_option_strike(close, sig)
-        entry_prem = price_option(close, strike, T_i, iv_i, opt)
+        entry_prem = get_prem(strike, opt, t, close, T_i, iv_i)
         sl_level = sl_level_for(close, row, df, i, sig, params['sl'], atr_mult, swing_n)
-        sl_prem = price_option(sl_level, strike, T_i, iv_i, opt)
+        sl_prem = get_prem(strike, opt, t, sl_level, T_i, iv_i)
         risk = entry_prem - sl_prem
         if risk <= 0:
             continue
@@ -222,7 +285,7 @@ def simulate(df_3m, params, engine=None):
         close = float(last['close'])
         iv_i = float(iv_series.iloc[-1]); T_i = float(T_series[-1])
         opt = 'CALL' if open_trade['type'] == 'BUY_CALL' else 'PUT'
-        cur = price_option(close, open_trade['strike'], T_i, iv_i, opt)
+        cur = get_prem(open_trade['strike'], opt, df.index[-1], close, T_i, iv_i)
         cost, _ = option_costs(open_trade['entry_prem'], cur, lot)
         pnl = open_trade['partial_pnl'] + (cur - open_trade['entry_prem']) * 0.5 * lot - cost
         open_trade.update(exit_prem=cur, exit_reason='End of Data', pnl=pnl,
@@ -290,7 +353,9 @@ def forensic_table(trades):
 # ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
-def load_data(mock, real_options):
+def load_data(mock, real_options, csv_path=None):
+    if csv_path:
+        return load_futures_csv(csv_path)
     bt = Backtester(mock=mock, real_options=real_options)
     if mock:
         df = generate_synthetic_futures()
@@ -313,17 +378,24 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--mock', action='store_true')
     ap.add_argument('--real-options', action='store_true')
+    ap.add_argument('--csv', default=None,
+                    help='Cached NIFTY FUT 3m CSV (date,open,high,low,close,volume)')
+    ap.add_argument('--opt-csv', default=None,
+                    help='Optional option-premium CSV (timestamp,strike,type,premium) for REAL premiums')
     ap.add_argument('--targets', default='1.0,1.25,1.5,2.0,2.5,3.0')
     args = ap.parse_args()
-    if not args.mock and not args.real_options:
+    if not args.mock and not args.real_options and not args.csv:
         args.mock = True  # safe default: never silently use real creds
 
+    src = 'CSV (cached)' if args.csv else ('REAL KITE DATA' if args.real_options else 'SYNTHETIC — NOT TRADEABLE')
     print("\n" + "=" * 78)
-    print("ADVERSARIAL OPTIMIZATION HARNESS"
-          + ("  [SYNTHETIC — NOT TRADEABLE]" if args.mock else "  [REAL KITE DATA]"))
+    print(f"ADVERSARIAL OPTIMIZATION HARNESS  [{src}]")
     print("=" * 78)
 
-    df = load_data(args.mock, args.real_options)
+    df = load_data(args.mock, args.real_options, args.csv)
+    opt_lookup = build_opt_lookup(args.opt_csv) if args.opt_csv else None
+    if opt_lookup is not None:
+        print("✓ Real option premiums loaded from --opt-csv")
     train, val, test = split_oos(df)
 
     # regime threshold learned ONLY from train (no future leak)
@@ -341,7 +413,7 @@ def main():
              ('supertrend', 'vwap'), ('supertrend', 'vwma'), ('vwap', 'vwma'),
              ('supertrend', 'vwap', 'vwma')]
     for m in masks:
-        tr = simulate(train, {**base, 'mask': m, 'regime': False})
+        tr = simulate(train, {**base, 'mask': m, 'regime': False}, opt_lookup=opt_lookup)
         mt = metrics(tr)
         pf = f"{mt['pf']:.2f}" if np.isfinite(mt['pf']) else 'inf'
         print(f"{str(m):<34}{mt['n']:>4}{mt['win']:>7.1f}{mt['target']:>7.1f}"
@@ -351,7 +423,7 @@ def main():
     print("\n--- §7 STOP-LOSS METHODS (train) ---")
     print(f"{'sl':<12}{'n':>4}{'win%':>7}{'sl%':>7}{'PF':>7}{'exp':>9}")
     for sl in ('supertrend', 'atr', 'swing'):
-        tr = simulate(train, {**base, 'sl': sl, 'regime': False})
+        tr = simulate(train, {**base, 'sl': sl, 'regime': False}, opt_lookup=opt_lookup)
         mt = metrics(tr)
         pf = f"{mt['pf']:.2f}" if np.isfinite(mt['pf']) else 'inf'
         print(f"{sl:<12}{mt['n']:>4}{mt['win']:>7.1f}{mt['sl']:>7.1f}{pf:>7}{mt['exp']:>9.0f}")
@@ -360,7 +432,7 @@ def main():
     print("\n--- §8 TARGET R MULTIPLE (train) ---")
     print(f"{'R':>5}{'n':>4}{'win%':>7}{'tgt%':>7}{'sl%':>7}{'PF':>7}{'exp':>9}")
     for R in [float(x) for x in args.targets.split(',')]:
-        tr = simulate(train, {**base, 'target_r': R, 'regime': False})
+        tr = simulate(train, {**base, 'target_r': R, 'regime': False}, opt_lookup=opt_lookup)
         mt = metrics(tr)
         pf = f"{mt['pf']:.2f}" if np.isfinite(mt['pf']) else 'inf'
         print(f"{R:>5.2f}{mt['n']:>4}{mt['win']:>7.1f}{mt['target']:>7.1f}{mt['sl']:>7.1f}{pf:>7}{mt['exp']:>9.0f}")
@@ -368,7 +440,7 @@ def main():
     # ---- §5 REGIME filter effect (best R from sweep above = 2.0 default) ----
     print("\n--- §5 REGIME NO-TRADE FILTER (train) ---")
     for regime in (False, True):
-        tr = simulate(train, {**base, 'regime': regime})
+        tr = simulate(train, {**base, 'regime': regime}, opt_lookup=opt_lookup)
         mt = metrics(tr)
         pf = f"{mt['pf']:.2f}" if np.isfinite(mt['pf']) else 'inf'
         print(f"regime={'ON ' if regime else 'OFF'}: n={mt['n']} win={mt['win']:.1f}% "
@@ -376,7 +448,7 @@ def main():
 
     # ---- §18 FORENSICS on full-sample current strategy ----
     print("\n--- §18 LOSING-TRADE FORENSICS (full sample, current rules) ---")
-    tr = simulate(df, {**base, 'regime': False})
+    tr = simulate(df, {**base, 'regime': False}, opt_lookup=opt_lookup)
     sl, total_sl, choppy = forensic_table(tr)
     print(f"  total SLs: {total_sl}")
     for k, v in sl.most_common():
@@ -387,7 +459,7 @@ def main():
     print("\n--- §14 OUT-OF-SAMPLE (untouched test split) ---")
     best = {**base, 'regime': True}  # regime ON chosen for demonstration
     for name, split in (('TRAIN', train), ('VALID', val), ('TEST(OOS)', test)):
-        tr = simulate(split, best)
+        tr = simulate(split, best, opt_lookup=opt_lookup)
         mt = metrics(tr)
         pf = f"{mt['pf']:.2f}" if np.isfinite(mt['pf']) else 'inf'
         print(f"  {name:<10} n={mt['n']:>3} win={mt['win']:>5.1f}% "
@@ -398,7 +470,7 @@ def main():
     print("\n--- §21 CURRENT vs V2 (regime-on) — full sample ---")
     for label, p in (('CURRENT', {**base, 'regime': False}),
                      ('V2', {**base, 'regime': True})):
-        tr = simulate(df, p); mt = metrics(tr)
+        tr = simulate(df, p, opt_lookup=opt_lookup); mt = metrics(tr)
         pf = f"{mt['pf']:.2f}" if np.isfinite(mt['pf']) else 'inf'
         print(f"  {label:<8} n={mt['n']:>3} win={mt['win']:>5.1f}% tgt={mt['target']:>5.1f}% "
               f"sl={mt['sl']:>5.1f}% PF={pf:>6} exp={mt['exp']:>7.0f} "
@@ -408,7 +480,9 @@ def main():
     print("\n" + "=" * 78)
     if args.mock:
         print("⚠️  SYNTHETIC DATA: above validates HARNESS LOGIC ONLY.")
-        print("    Re-run with --real-options (Kite historical API + creds) for tradeable results.")
+        print("    Re-run with --csv <fut.csv> [--opt-csv <prem.csv>] for tradeable results.")
+    elif args.csv:
+        print("✅ CACHED-CSV run complete. Review OOS/validation stability before any verdict.")
     else:
         print("✅ Real-data run complete. Review OOS/validation stability before any verdict.")
     print("=" * 78)
