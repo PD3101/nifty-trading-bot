@@ -128,10 +128,17 @@ def get_nearest_nifty_fut(kite):
 
 
 def format_weekly_symbol(expiry_date, strike, option_type):
-    """NSE weekly option tradingsymbol, e.g. NIFTY21AUG24800CE."""
+    """NSE weekly option tradingsymbol, e.g. NIFTY18AUG2624000CE.
+
+    NOTE: NIFTY weekly options embed the 2-digit YEAR between month and
+    strike (weekly = dd+MMM+YY+strike; monthly = MMM+YY+strike). The exact
+    string is only used for DISPLAY — resolution uses expiry/strike/type so
+    a format drift won't break data fetching.
+    """
     mon = expiry_date.strftime('%d%b').upper()
+    yy = expiry_date.strftime('%y')
     suffix = 'CE' if option_type == 'CALL' else 'PE'
-    return f"NIFTY{mon}{int(strike)}{suffix}"
+    return f"NIFTY{mon}{yy}{int(strike)}{suffix}"
 
 
 def next_weekly_expiry(from_date=None):
@@ -146,12 +153,38 @@ def next_weekly_expiry(from_date=None):
 
 
 def resolve_weekly_option(kite, expiry_date, strike, option_type):
-    """Return (tradingsymbol, instrument_token) for the NIFTY weekly option, or (sym, None)."""
+    """Return (tradingsymbol, instrument_token) for the NIFTY weekly option.
+
+    Robust in two passes:
+      1. Exact tradingsymbol match (fast, backward-compatible).
+      2. Fallback: match by name==NIFTY + exchange==NFO + instrument_type
+         (CE/PE) + strike + expiry. This is format-agnostic, so a change in
+         Zerodha's symbol naming can't break option resolution.
+    Returns (tradingsymbol, token) or (constructed_sym, None) on failure.
+    """
     sym = format_weekly_symbol(expiry_date, strike, option_type)
+    want_type = 'CE' if option_type == 'CALL' else 'PE'
     try:
         instruments = kite.instruments("NFO")
         for i in instruments:
             if i.get('tradingsymbol') == sym and i.get('exchange') == 'NFO':
+                return i['tradingsymbol'], i['instrument_token']
+        # Fallback: expiry + strike + type (normalize expiry to YYYY-MM-DD so
+        # a date vs datetime mismatch in the instrument list can't hide it)
+        exp_s = str(expiry_date)
+        if hasattr(expiry_date, 'isoformat'):
+            exp_s = expiry_date.isoformat()
+        for i in instruments:
+            ie = i.get('expiry')
+            ie_s = str(ie)
+            if hasattr(ie, 'isoformat'):
+                ie_s = ie.isoformat()
+            if (i.get('name') == 'NIFTY'
+                    and i.get('exchange') == 'NFO'
+                    and i.get('instrument_type') == want_type
+                    and i.get('strike') is not None
+                    and float(i['strike']) == float(strike)
+                    and ie_s == exp_s):
                 return i['tradingsymbol'], i['instrument_token']
     except Exception as e:
         logger.error(f"Option resolve failed: {e}")

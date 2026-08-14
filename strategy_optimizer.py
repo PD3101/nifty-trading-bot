@@ -34,6 +34,20 @@ from option_pricer import price_option, option_costs
 from backtester import generate_synthetic_futures, Backtester
 
 
+def _norm_expiry(e):
+    """Normalize an expiry (date / datetime / str) to 'YYYY-MM-DD' for keys."""
+    if e is None:
+        return None
+    if isinstance(e, str):
+        e = pd.to_datetime(e)
+    if hasattr(e, 'date') and not isinstance(e, (int, float)):
+        try:
+            e = e.date()
+        except Exception:
+            pass
+    return e.isoformat() if hasattr(e, 'isoformat') else str(e)
+
+
 # ---------------------------------------------------------------------------
 # Indicators the harness needs beyond the standard set
 # ---------------------------------------------------------------------------
@@ -398,8 +412,7 @@ def export_csv(start, end, out_dir='.', band=5):
     """
     import os
     from datetime import date as _d, timedelta as _td
-    from kite_fetcher import (get_kite_client, get_nearest_nifty_fut,
-                              format_weekly_symbol)
+    from kite_fetcher import (get_kite_client, get_nearest_nifty_fut)
     os.makedirs(out_dir, exist_ok=True)
     kite = get_kite_client()
     fut = get_nearest_nifty_fut(kite)
@@ -429,7 +442,14 @@ def export_csv(start, end, out_dir='.', band=5):
 
     print("Loading NFO instruments (one call) …")
     insts = kite.instruments('NFO')
-    sym2tok = {i['tradingsymbol']: i['instrument_token'] for i in insts}
+    # Option token lookup keyed by (expiry, strike, type) — format-agnostic,
+    # so a Zerodha symbol-naming change can't break the pull.
+    opt_tok = {}
+    for i in insts:
+        if (i.get('name') == 'NIFTY' and i.get('exchange') == 'NFO'
+                and i.get('instrument_type') in ('CE', 'PE') and i.get('strike')):
+            opt_tok[(_norm_expiry(i.get('expiry')), float(i['strike']),
+                     i['instrument_type'])] = i['instrument_token']
 
     rows, total = [], len(tuesdays) * len(strikes) * 2
     done = 0
@@ -437,8 +457,8 @@ def export_csv(start, end, out_dir='.', band=5):
     for expiry in tuesdays:
         for strike in strikes:
             for typ in ('CALL', 'PUT'):
-                sym = format_weekly_symbol(expiry, strike, typ)
-                tok = sym2tok.get(sym)
+                tok = opt_tok.get((_norm_expiry(expiry), float(strike),
+                                   'CE' if typ == 'CALL' else 'PE'))
                 if not tok:
                     done += 1
                     continue
