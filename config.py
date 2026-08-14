@@ -26,8 +26,8 @@ TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID', '')
 FUTURES_SYMBOL = "^NSEI"   # NIFTY 50 Index (proxy for futures)
 SPOT_SYMBOL = "^NSEI"      # NIFTY Spot
 
-EXECUTION_TIMEFRAME = "3m"  # All rules run on 3-minute chart
-HIGHER_TIMEFRAME = None     # No 15m HTF bias in this strategy
+EXECUTION_TIMEFRAME = "3m"  # Entry triggers run on 3-minute FUT chart
+HIGHER_TIMEFRAME = "15m"    # TREND BIAS: 15m FUT chart (up/down only)
 
 MARKET_OPEN = "09:15"       # NSE opens
 MARKET_CLOSE = "15:30"      # NSE closes
@@ -52,9 +52,26 @@ STRIKE_INTERVAL = 50          # NIFTY strike interval (50 pts)
 ITM_STRIKES = 1               # Default: 1 strike ITM (50 pts for NIFTY)
 ITM_POINTS = STRIKE_INTERVAL * ITM_STRIKES  # 50 pts ITM
 
-# ATM only on high-conviction setups with strong OI support
-# (OI data not yet available — defaults to ITM only)
-ALLOW_ATM_HIGH_CONVICTION = False
+# Strike selection method:
+#   "itm_fixed" -> 1 strike ITM (legacy, fixed)
+#   "delta"      -> pick strike whose Black-Scholes delta ≈ TARGET_DELTA
+#                   (delta≈0.5 = ATM = max gamma; 0.55 = slightly ITM).
+#                   Uses delta/gamma awareness instead of a fixed offset.
+STRIKE_SELECTION = "delta"
+TARGET_DELTA = 0.55           # CALL delta target (|PUT delta| target). ~0.5 = ATM.
+DELTA_LOOK = 4                # scan ±DELTA_LOOK strikes around spot
+
+# ATM allowed via delta band (no OI needed) — overrides old OI gate.
+ALLOW_ATM_HIGH_CONVICTION = True
+
+# ============================================================================
+# HIGHER-TIMEFRAME TREND FILTER (15m FUT)
+# ============================================================================
+# Trade only in the direction of the 15m futures trend (Supertrend direction).
+# This kills counter-trend pullback entries — the main stop-out source.
+HTF_TREND_ENABLED = True
+HTF_TIMEFRAME = "15m"
+HTF_USE = "FUT"               # trend read from 15m NIFTY FUT (not spot)
 
 # ============================================================================
 # ENTRY RULES
@@ -82,10 +99,10 @@ NO_ENTRY_AFTER = "14:30"      # IST — no new entries in the last hour
 # (not a direction flip — the actual Supertrend line value)
 
 # Target: 1:2 Risk-Reward ratio
-RR_RATIO = 2.0                # Risk-Reward multiplier
+RR_RATIO = 1.5                # User: target 1:1 to 1:1.5 MAX (not 1:2)
 
 # Hybrid exit (Notes section):
-# Book 50% at 1:1, trail remaining 50% for 1:2+
+# Book 50% at 1:1, trail remaining 50% for 1:1.5
 HYBRID_EXIT_ENABLED = True
 PARTIAL_BOOK_PERCENT = 50     # Book this % at 1:1
 

@@ -173,14 +173,40 @@ class Backtester:
             return None
         return df[self.start_date:self.end_date]
 
+    def _load_15m(self, df_3m):
+        """15m futures dataframe for the HTF trend filter.
+
+        Mock: resample the synthetic 3m. Live: fetch real 15m from Kite.
+        Returns None if unavailable (HTF filter then simply disabled).
+        """
+        if self.mock:
+            agg = df_3m.resample('15min').agg(
+                open=('open', 'first'), high=('high', 'max'),
+                low=('low', 'min'), close=('close', 'last'),
+                volume=('volume', 'sum')).dropna()
+            return agg
+        try:
+            from kite_fetcher import fetch_15m_data
+            return fetch_15m_data(lookback_days=5)
+        except Exception as e:
+            print(f"  [htf] 15m fetch failed ({e}); HTF filter disabled")
+            return None
+
     # ----------------------------------------------------------------
-    def _run_on_df(self, df_3m, mult=None, vwma_len=None, real_options=None):
+    def _run_on_df(self, df_3m, mult=None, vwma_len=None, real_options=None, htf_df=None):
         if df_3m is None or len(df_3m) < 20:
             return None
         real_options = self.real_options if real_options is None else real_options
         self._bt_start = df_3m.index[0]
         self._bt_end = df_3m.index[-1]
         df = Indicators.add_all_indicators(df_3m.copy(), "3m")
+
+        # 15m higher-timeframe trend bias (direction only)
+        hdir_series = None
+        if config.HTF_TREND_ENABLED and htf_df is not None and len(htf_df) >= 2:
+            hst, hdir = Indicators.calculate_supertrend(
+                htf_df, config.SUPERTREND_PERIOD, config.SUPERTREND_MULTIPLIER)
+            hdir_series = pd.Series(hdir, index=htf_df.index)
         if mult is not None:
             st, direction = Indicators.calculate_supertrend(df, config.SUPERTREND_PERIOD, mult)
             df["3m_supertrend"] = st
@@ -279,7 +305,11 @@ class Backtester:
                     continue
 
             spot = close
-            signal = self.strategy.generate_signal(row, df, i, spot_price=spot)
+            htf_dir = None
+            if hdir_series is not None:
+                v = hdir_series.asof(t)
+                htf_dir = 'up' if v == 1 else ('down' if v == -1 else None)
+            signal = self.strategy.generate_signal(row, df, i, spot_price=spot, htf_dir=htf_dir)
             if not signal:
                 continue
 
@@ -293,7 +323,7 @@ class Backtester:
             if config.LIQUIDITY_FILTER_ENABLED and entry_prem < config.MIN_PREMIUM:
                 continue
             target_1_1 = entry_prem + risk
-            target_1_2 = entry_prem + 2 * risk
+            target_1_2 = entry_prem + config.RR_RATIO * risk
             open_trade = Trade(signal, t, entry_prem, sl_prem, target_1_1, target_1_2, iv_i, T_i)
 
         # close any open trade at end
@@ -391,7 +421,8 @@ class Backtester:
         print(f"Period: {self.start_date} to {self.end_date}  mock={self.mock}")
         print("=" * 80)
         df = self._load_df()
-        res = self._run_on_df(df)
+        htf = self._load_15m(df) if config.HTF_TREND_ENABLED else None
+        res = self._run_on_df(df, htf_df=htf)
         if res is None or res["num_trades"] == 0:
             print("No trades executed.")
             return res

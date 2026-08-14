@@ -18,6 +18,7 @@ Target: 1:2 Risk-Reward ratio.
 """
 
 import numpy as np
+import pandas as pd
 import config
 from indicators import Indicators
 
@@ -152,15 +153,41 @@ class StrategyEngine:
         return True
 
     # ------------------------------------------------------------------
+    # Higher-timeframe trend (15m FUT) — direction bias only
+    # ------------------------------------------------------------------
+    def htf_trend_direction(self, df_15m, t):
+        """Return 'up' / 'down' / None from the 15m Supertrend direction.
+
+        Uses only 15m bars that have CLOSED at or before t (no look-ahead).
+        """
+        if df_15m is None or len(df_15m) < 2:
+            return None
+        st, direction = Indicators.calculate_supertrend(
+            df_15m, config.SUPERTREND_PERIOD, config.SUPERTREND_MULTIPLIER)
+        dir_series = pd.Series(direction, index=df_15m.index)
+        val = dir_series.asof(t)
+        if val == 1:
+            return 'up'
+        if val == -1:
+            return 'down'
+        return None
+
+    # ------------------------------------------------------------------
     # Strike selection
     # ------------------------------------------------------------------
 
     def select_option_strike(self, spot_price, signal_type):
         """
-        Default: 1 strike ITM (50 pts for NIFTY).
-        ATM allowed ONLY on high-conviction setups (strong OI support) —
-        OI data not yet available, so always ITM.
+        Method is controlled by config.STRIKE_SELECTION:
+          - "itm_fixed": 1 strike ITM (legacy, fixed offset)
+          - "delta": pick the strike whose BS delta ≈ TARGET_DELTA
+                     (delta≈0.5 = ATM = max gamma; 0.55 = slightly ITM).
+                     Uses delta/gamma awareness, not a fixed offset.
         """
+        if config.STRIKE_SELECTION == 'delta':
+            return self._select_strike_by_delta(spot_price, signal_type)
+
+        # --- legacy fixed ITM ---
         strike_interval = config.STRIKE_INTERVAL
         itm_points = config.ITM_POINTS  # 50 pts
 
@@ -176,6 +203,33 @@ class StrategyEngine:
             return None
 
         return strike
+
+    def _select_strike_by_delta(self, spot_price, signal_type):
+        """Strike whose Black-Scholes delta is closest to TARGET_DELTA.
+
+        Picking by delta (≈0.5 = ATM, max gamma) lets the premium track the
+        underlying more faithfully than a fixed 1-ITM offset. Ranking is robust
+        to the IV proxy; real IV only shifts the curve slightly.
+        """
+        from option_pricer import bs_delta
+        T = config.DAYS_TO_EXPIRY / 252.0
+        iv = config.IV_FIXED
+        r = config.BS_RISK_FREE_RATE
+        interval = config.STRIKE_INTERVAL
+        lo = int((spot_price - config.DELTA_LOOK * interval) // interval) * interval
+        hi = int((spot_price + config.DELTA_LOOK * interval) // interval) * interval
+
+        best, best_err = None, 1e9
+        for k in range(lo, hi + 1, interval):
+            if signal_type == 'BUY_CALL':
+                d = bs_delta(spot_price, k, T, r, iv, 'CALL')
+                err = abs(d - config.TARGET_DELTA)
+            else:
+                d = bs_delta(spot_price, k, T, r, iv, 'PUT')
+                err = abs(abs(d) - config.TARGET_DELTA)
+            if err < best_err:
+                best_err, best = err, k
+        return best if best is not None else int(spot_price // interval) * interval
 
     # ------------------------------------------------------------------
     # Confidence (simplified — kept for compatibility)
@@ -212,15 +266,17 @@ class StrategyEngine:
     # Main signal generation
     # ------------------------------------------------------------------
 
-    def generate_signal(self, row_3m, df_3m, current_idx, spot_price=None):
+    def generate_signal(self, row_3m, df_3m, current_idx, spot_price=None, htf_dir=None):
         """
-        Generate a trading signal. No HTF bias — all on 3m.
+        Generate a trading signal.
 
         Args:
             row_3m: latest closed 3m candle (pd.Series)
             df_3m: full 3m DataFrame (for pullback/chase checks)
             current_idx: integer index position of row_3m in df_3m
             spot_price: SPOT price for strike selection (defaults to close)
+            htf_dir: 'up' / 'down' / None — 15m trend bias. If set and the
+                HTF trend filter is enabled, only trade with the trend.
 
         Returns:
             dict with signal info including 'supertrend_level' for stoploss
@@ -249,6 +305,8 @@ class StrategyEngine:
             }
             signal['confidence'] = self.calculate_signal_confidence(signal)
             signal['reason'] = self.generate_signal_reason(signal)
+            if config.HTF_TREND_ENABLED and htf_dir not in (None, 'up'):
+                return None
             return signal
 
         # Check PUT
@@ -271,6 +329,8 @@ class StrategyEngine:
             }
             signal['confidence'] = self.calculate_signal_confidence(signal)
             signal['reason'] = self.generate_signal_reason(signal)
+            if config.HTF_TREND_ENABLED and htf_dir not in (None, 'down'):
+                return None
             return signal
 
         return None

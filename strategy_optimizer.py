@@ -159,11 +159,11 @@ def sl_level_for(spot, row, df, i, sig_type, method, atr_mult, swing_n):
 # ---------------------------------------------------------------------------
 # Core simulation
 # ---------------------------------------------------------------------------
-def simulate(df_3m, params, opt_lookup=None, engine=None):
+def simulate(df_3m, params, opt_lookup=None, htf_df=None, engine=None):
     """Run one configured variant. Returns list of trade dicts + forensics.
 
     opt_lookup: callable(strike, opt_type, timestamp) -> premium | None.
-    When it returns a premium, that real value is used; else Black-Scholes.
+    htf_df: 15m futures dataframe for the higher-timeframe trend bias.
     """
     engine = engine or StrategyEngine()
 
@@ -180,6 +180,13 @@ def simulate(df_3m, params, opt_lookup=None, engine=None):
     df = Indicators.add_all_indicators(df_3m.copy(), "3m")
     add_atr(df)
     add_trend_slope(df)
+
+    # 15m higher-timeframe trend bias (direction only)
+    hdir_series = None
+    if config.HTF_TREND_ENABLED and htf_df is not None and len(htf_df) >= 2:
+        hst, hdir = Indicators.calculate_supertrend(
+            htf_df, config.SUPERTREND_PERIOD, config.SUPERTREND_MULTIPLIER)
+        hdir_series = pd.Series(hdir, index=htf_df.index)
 
     lot = config.LOT_SIZE
     ret = df['close'].pct_change().fillna(0.0)
@@ -261,6 +268,15 @@ def simulate(df_3m, params, opt_lookup=None, engine=None):
         sig = entry_decision(engine, row, df, i, params['mask'])
         if not sig:
             continue
+
+        # Higher-timeframe trend gate (only trade with the 15m bias)
+        if config.HTF_TREND_ENABLED and hdir_series is not None:
+            hv = hdir_series.asof(t)
+            htf_dir = 'up' if hv == 1 else ('down' if hv == -1 else None)
+            if sig == 'BUY_CALL' and htf_dir != 'up':
+                continue
+            if sig == 'BUY_PUT' and htf_dir != 'down':
+                continue
 
         opt = 'CALL' if sig == 'BUY_CALL' else 'PUT'
         strike = engine.select_option_strike(close, sig)
@@ -436,7 +452,19 @@ def export_csv(start, end, out_dir='.', band=5):
     od = pd.DataFrame(rows, columns=['timestamp', 'strike', 'type', 'premium'])
     od.to_csv(os.path.join(out_dir, 'opt.csv'), index=False, date_format='%Y-%m-%d %H:%M:%S')
     print(f"  ✓ opt.csv: {len(od)} rows  →  {out_dir}")
-    return os.path.join(out_dir, 'fut.csv'), os.path.join(out_dir, 'opt.csv')
+
+    # 15m futures for the HTF trend filter
+    print("Exporting 15m FUT (HTF trend) …")
+    f15 = _hist_chunked(kite, fut['instrument_token'], start, end, '15minute')
+    f15df = pd.DataFrame(f15)
+    fut15_p = None
+    if len(f15df):
+        f15df['date'] = pd.to_datetime(f15df['date'])
+        f15df = f15df[['date', 'open', 'high', 'low', 'close', 'volume']]
+        fut15_p = os.path.join(out_dir, 'fut15.csv')
+        f15df.to_csv(fut15_p, index=False, date_format='%Y-%m-%d %H:%M:%S')
+        print(f"  ✓ fut15.csv: {len(f15df)} rows")
+    return os.path.join(out_dir, 'fut.csv'), os.path.join(out_dir, 'opt.csv'), fut15_p
 
 
 # ---------------------------------------------------------------------------
@@ -462,7 +490,7 @@ def split_oos(df, train=0.6, val=0.2):
     return df.iloc[:i1], df.iloc[i1:i2], df.iloc[i2:]
 
 
-def run_analysis(df, opt_lookup, targets='1.0,1.25,1.5,2.0,2.5,3.0'):
+def run_analysis(df, opt_lookup, htf_df=None, targets='1.0,1.25,1.5,2.0,2.5,3.0'):
     """Execute the full §12–§21 analysis on a prepared dataframe."""
     train, val, test = split_oos(df)
 
@@ -471,7 +499,7 @@ def run_analysis(df, opt_lookup, targets='1.0,1.25,1.5,2.0,2.5,3.0'):
     vol_q = (ret.rolling(config.IV_WINDOW).std() * np.sqrt(252)).quantile(0.25)
 
     base = dict(mask=('supertrend', 'vwap', 'vwma'), sl='supertrend',
-                target_r=2.0, hybrid=True, atr_mult=1.5, swing_n=10,
+                target_r=config.RR_RATIO, hybrid=True, atr_mult=1.5, swing_n=10,
                 regime_vol_q=vol_q, regime_slope_eps=0.0008)
 
     # ---- §12 ABLATION ----
@@ -481,7 +509,7 @@ def run_analysis(df, opt_lookup, targets='1.0,1.25,1.5,2.0,2.5,3.0'):
              ('supertrend', 'vwap'), ('supertrend', 'vwma'), ('vwap', 'vwma'),
              ('supertrend', 'vwap', 'vwma')]
     for m in masks:
-        tr = simulate(train, {**base, 'mask': m, 'regime': False}, opt_lookup=opt_lookup)
+        tr = simulate(train, {**base, 'mask': m, 'regime': False}, opt_lookup=opt_lookup, htf_df=htf_df)
         mt = metrics(tr)
         pf = f"{mt['pf']:.2f}" if np.isfinite(mt['pf']) else 'inf'
         print(f"{str(m):<34}{mt['n']:>4}{mt['win']:>7.1f}{mt['target']:>7.1f}"
@@ -491,7 +519,7 @@ def run_analysis(df, opt_lookup, targets='1.0,1.25,1.5,2.0,2.5,3.0'):
     print("\n--- §7 STOP-LOSS METHODS (train) ---")
     print(f"{'sl':<12}{'n':>4}{'win%':>7}{'sl%':>7}{'PF':>7}{'exp':>9}")
     for sl in ('supertrend', 'atr', 'swing'):
-        tr = simulate(train, {**base, 'sl': sl, 'regime': False}, opt_lookup=opt_lookup)
+        tr = simulate(train, {**base, 'sl': sl, 'regime': False}, opt_lookup=opt_lookup, htf_df=htf_df)
         mt = metrics(tr)
         pf = f"{mt['pf']:.2f}" if np.isfinite(mt['pf']) else 'inf'
         print(f"{sl:<12}{mt['n']:>4}{mt['win']:>7.1f}{mt['sl']:>7.1f}{pf:>7}{mt['exp']:>9.0f}")
@@ -500,7 +528,7 @@ def run_analysis(df, opt_lookup, targets='1.0,1.25,1.5,2.0,2.5,3.0'):
     print("\n--- §8 TARGET R MULTIPLE (train) ---")
     print(f"{'R':>5}{'n':>4}{'win%':>7}{'tgt%':>7}{'sl%':>7}{'PF':>7}{'exp':>9}")
     for R in [float(x) for x in targets.split(',')]:
-        tr = simulate(train, {**base, 'target_r': R, 'regime': False}, opt_lookup=opt_lookup)
+        tr = simulate(train, {**base, 'target_r': R, 'regime': False}, opt_lookup=opt_lookup, htf_df=htf_df)
         mt = metrics(tr)
         pf = f"{mt['pf']:.2f}" if np.isfinite(mt['pf']) else 'inf'
         print(f"{R:>5.2f}{mt['n']:>4}{mt['win']:>7.1f}{mt['target']:>7.1f}{mt['sl']:>7.1f}{pf:>7}{mt['exp']:>9.0f}")
@@ -508,7 +536,7 @@ def run_analysis(df, opt_lookup, targets='1.0,1.25,1.5,2.0,2.5,3.0'):
     # ---- §5 REGIME filter effect ----
     print("\n--- §5 REGIME NO-TRADE FILTER (train) ---")
     for regime in (False, True):
-        tr = simulate(train, {**base, 'regime': regime}, opt_lookup=opt_lookup)
+        tr = simulate(train, {**base, 'regime': regime}, opt_lookup=opt_lookup, htf_df=htf_df)
         mt = metrics(tr)
         pf = f"{mt['pf']:.2f}" if np.isfinite(mt['pf']) else 'inf'
         print(f"regime={'ON ' if regime else 'OFF'}: n={mt['n']} win={mt['win']:.1f}% "
@@ -516,7 +544,7 @@ def run_analysis(df, opt_lookup, targets='1.0,1.25,1.5,2.0,2.5,3.0'):
 
     # ---- §18 FORENSICS on full-sample current strategy ----
     print("\n--- §18 LOSING-TRADE FORENSICS (full sample, current rules) ---")
-    tr = simulate(df, {**base, 'regime': False}, opt_lookup=opt_lookup)
+    tr = simulate(df, {**base, 'regime': False}, opt_lookup=opt_lookup, htf_df=htf_df)
     sl, total_sl, choppy = forensic_table(tr)
     print(f"  total SLs: {total_sl}")
     for k, v in sl.most_common():
@@ -527,7 +555,7 @@ def run_analysis(df, opt_lookup, targets='1.0,1.25,1.5,2.0,2.5,3.0'):
     print("\n--- §14 OUT-OF-SAMPLE (untouched test split) ---")
     best = {**base, 'regime': True}
     for name, split in (('TRAIN', train), ('VALID', val), ('TEST(OOS)', test)):
-        tr = simulate(split, best, opt_lookup=opt_lookup)
+        tr = simulate(split, best, opt_lookup=opt_lookup, htf_df=htf_df)
         mt = metrics(tr)
         pf = f"{mt['pf']:.2f}" if np.isfinite(mt['pf']) else 'inf'
         print(f"  {name:<10} n={mt['n']:>3} win={mt['win']:>5.1f}% "
@@ -538,7 +566,7 @@ def run_analysis(df, opt_lookup, targets='1.0,1.25,1.5,2.0,2.5,3.0'):
     print("\n--- §21 CURRENT vs V2 (regime-on) — full sample ---")
     for label, p in (('CURRENT', {**base, 'regime': False}),
                      ('V2', {**base, 'regime': True})):
-        tr = simulate(df, p, opt_lookup=opt_lookup); mt = metrics(tr)
+        tr = simulate(df, p, opt_lookup=opt_lookup, htf_df=htf_df); mt = metrics(tr)
         pf = f"{mt['pf']:.2f}" if np.isfinite(mt['pf']) else 'inf'
         print(f"  {label:<8} n={mt['n']:>3} win={mt['win']:>5.1f}% tgt={mt['target']:>5.1f}% "
               f"sl={mt['sl']:>5.1f}% PF={pf:>6} exp={mt['exp']:>7.0f} "
@@ -560,13 +588,13 @@ def send_telegram(text):
         print(f"⚠️  Telegram notify failed: {e}")
 
 
-def run_and_notify(df, opt_lookup, targets, notify):
+def run_and_notify(df, opt_lookup, targets, notify, htf_df=None):
     """Run the analysis, print it, and optionally post to Telegram."""
     import io
     from contextlib import redirect_stdout
     buf = io.StringIO()
     with redirect_stdout(buf):
-        run_analysis(df, opt_lookup, targets=targets)
+        run_analysis(df, opt_lookup, htf_df=htf_df, targets=targets)
     text = buf.getvalue()
     print(text)
     if notify:
@@ -600,8 +628,8 @@ def main():
     # --- automated export ---
     if args.auto or args.export_csv:
         try:
-            fut_p, opt_p = export_csv(args.export_start, args.export_end,
-                                     args.export_out, args.export_band)
+            fut_p, opt_p, fut15_p = export_csv(args.export_start, args.export_end,
+                                              args.export_out, args.export_band)
         except Exception as e:
             print(f"❌ Export failed: {e}")
             sys.exit(1)
@@ -611,10 +639,11 @@ def main():
         # --auto: load what we just pulled and analyze
         df = load_futures_csv(fut_p)
         opt_lookup = build_opt_lookup(opt_p)
+        htf_df = load_futures_csv(fut15_p) if (fut15_p and os.path.exists(fut15_p)) else None
         print("\n" + "=" * 78)
         print("ADVERSARIAL OPTIMIZATION HARNESS  [AUTO — real Kite data]")
         print("=" * 78)
-        run_and_notify(df, opt_lookup, args.targets, args.notify)
+        run_and_notify(df, opt_lookup, args.targets, args.notify, htf_df=htf_df)
         print("\n" + "=" * 78)
         print("✅ Auto run complete (real Kite history). Review OOS/validation stability.")
         print("=" * 78)

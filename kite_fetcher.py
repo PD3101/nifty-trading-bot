@@ -258,6 +258,43 @@ def quote_option_ltp(kite, instrument_token):
         return None
 
 
+def fetch_15m_data(lookback_days=5):
+    """Fetch NIFTY futures 15m candles (HTF trend bias). Same contract as 3m."""
+    try:
+        kite = get_kite_client()
+        contract = get_nearest_nifty_fut(kite)
+
+        to_date = datetime.now(IST)
+        from_date = to_date - timedelta(days=lookback_days)
+
+        candles = kite.historical_data(
+            instrument_token=contract['instrument_token'],
+            from_date=from_date.strftime('%Y-%m-%d'),
+            to_date=to_date.strftime('%Y-%m-%d'),
+            interval='15minute'
+        )
+
+        if not candles:
+            logger.error("No 15m candle data returned from Kite")
+            return None
+
+        df = pd.DataFrame(candles)
+        df['date'] = pd.to_datetime(df['date'])
+        df.set_index('date', inplace=True)
+        df.index.name = None
+        df.columns = [c.lower() for c in df.columns]
+        if df.index.tz is None:
+            df.index = df.index.tz_localize('Asia/Kolkata')
+        else:
+            df.index = df.index.tz_convert('Asia/Kolkata')
+        df = df[['open', 'high', 'low', 'close', 'volume']]
+        logger.info(f"Fetched {len(df)} 15m candles: {df.index[0]} to {df.index[-1]}")
+        return df
+    except Exception as e:
+        logger.error(f"Failed to fetch Kite 15m data: {e}")
+        return None
+
+
 def refresh_token(api_key, api_secret):
     """
     Fully automated Kite token refresh using headless browser + TOTP.

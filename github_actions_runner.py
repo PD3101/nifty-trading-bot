@@ -427,6 +427,17 @@ def main():
     spot = float(latest3['close'])
     strategy = StrategyEngine()
 
+    # 15m higher-timeframe trend bias (direction only) — gate entries to trend
+    htf_dir = None
+    if config.HTF_TREND_ENABLED:
+        try:
+            from kite_fetcher import fetch_15m_data
+            df15 = fetch_15m_data(lookback_days=2)
+            if df15 is not None and len(df15) >= 2:
+                htf_dir = strategy.htf_trend_direction(df15, latest3.name)
+        except Exception as e:
+            logger.warning(f"HTF 15m fetch failed: {e}")
+
     # --- Open position → check exits ---
     position = state.get('open_position')
     if position:
@@ -474,7 +485,7 @@ def main():
 
     # --- Flat → look for entry ---
     else:
-        signal = strategy.generate_signal(latest3, df3, current_idx, spot_price=spot)
+        signal = strategy.generate_signal(latest3, df3, current_idx, spot_price=spot, htf_dir=htf_dir)
         if signal:
             opt_type = 'CALL' if signal['type'] == 'BUY_CALL' else 'PUT'
             entry_price = live_option_premium(spot, signal['recommended_strike'], opt_type)
@@ -496,8 +507,8 @@ def main():
                 save_state(state)
                 return
 
-            target_1_1 = entry_price + risk   # 1:1 RR
-            target_1_2 = entry_price + 2 * risk  # 1:2 RR
+            target_1_1 = entry_price + risk                    # 1:1 RR
+            target_1_2 = entry_price + config.RR_RATIO * risk  # configurable (default 1:1.5)
 
             state['open_position'] = {
                 'date': today,
