@@ -351,6 +351,92 @@ def forensic_table(trades):
 
 
 # ---------------------------------------------------------------------------
+# Automated Kite exporter (no manual download)
+# ---------------------------------------------------------------------------
+def _hist_chunked(kite, token, start, end, interval, max_days=30):
+    """Kite historical_data in <=max_days windows (respects API range limits)."""
+    from datetime import datetime as _dt, timedelta as _td2
+    s = _dt.fromisoformat(start) if isinstance(start, str) else start
+    e = _dt.fromisoformat(end) if isinstance(end, str) else end
+    out, cur = [], s
+    while cur < e:
+        nxt = min(cur + _td2(days=max_days), e)
+        try:
+            out += kite.historical_data(token, cur.strftime('%Y-%m-%d'),
+                                        nxt.strftime('%Y-%m-%d'), interval)
+        except Exception as ex:
+            print(f"  ⚠ hist fetch {cur.date()}: {ex}")
+        cur = nxt
+    return out
+
+
+def export_csv(start, end, out_dir='.', band=5):
+    """Pull FUT 3m + real option premiums from Kite and write fut.csv/opt.csv.
+
+    Fully automated: resolves weekly option tokens once via the NFO instrument
+    map, fetches history in chunks, writes CSVs the harness can consume.
+    """
+    import os
+    from datetime import date as _d, timedelta as _td
+    from kite_fetcher import (get_kite_client, get_nearest_nifty_fut,
+                              format_weekly_symbol)
+    os.makedirs(out_dir, exist_ok=True)
+    kite = get_kite_client()
+    fut = get_nearest_nifty_fut(kite)
+    print(f"Exporting FUT {fut['tradingsymbol']} ({start} → {end}) …")
+    fhist = _hist_chunked(kite, fut['instrument_token'], start, end, '3minute')
+    fdf = pd.DataFrame(fhist)
+    fdf['date'] = pd.to_datetime(fdf['date'])
+    fdf = fdf[['date', 'open', 'high', 'low', 'close', 'volume']]
+    fdf.to_csv(os.path.join(out_dir, 'fut.csv'), index=False, date_format='%Y-%m-%d %H:%M:%S')
+    print(f"  ✓ fut.csv: {len(fdf)} rows")
+
+    closes = fdf['close'].astype(float)
+    lo = int(np.floor(closes.min() / 50) * 50) - band * 50
+    hi = int(np.ceil(closes.max() / 50) * 50) + band * 50
+    strikes = list(range(lo, hi + 1, 50))
+
+    sd = _d.fromisoformat(start) if isinstance(start, str) else start
+    ed = _d.fromisoformat(end) if isinstance(end, str) else end
+    tuesdays = []
+    cur = sd
+    while cur <= ed:
+        if cur.weekday() == config.EXPIRY_DAY:   # user-confirmed Tuesday expiry
+            tuesdays.append(cur)
+        cur += _td(days=1)
+    if not tuesdays:
+        tuesdays.append(sd)
+
+    print("Loading NFO instruments (one call) …")
+    insts = kite.instruments('NFO')
+    sym2tok = {i['tradingsymbol']: i['instrument_token'] for i in insts}
+
+    rows, total = [], len(tuesdays) * len(strikes) * 2
+    done = 0
+    for expiry in tuesdays:
+        for strike in strikes:
+            for typ in ('CALL', 'PUT'):
+                sym = format_weekly_symbol(expiry, strike, typ)
+                tok = sym2tok.get(sym)
+                if not tok:
+                    done += 1
+                    continue
+                try:
+                    h = _hist_chunked(kite, tok, start, end, '3minute')
+                except Exception:
+                    done += 1
+                    continue
+                for c in h:
+                    rows.append((c['date'], strike, typ, c['close']))
+                done += 1
+        print(f"  expiry {expiry}: {done}/{total} contracts pulled")
+    od = pd.DataFrame(rows, columns=['timestamp', 'strike', 'type', 'premium'])
+    od.to_csv(os.path.join(out_dir, 'opt.csv'), index=False, date_format='%Y-%m-%d %H:%M:%S')
+    print(f"  ✓ opt.csv: {len(od)} rows  →  {out_dir}")
+    return os.path.join(out_dir, 'fut.csv'), os.path.join(out_dir, 'opt.csv')
+
+
+# ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
 def load_data(mock, real_options, csv_path=None):
@@ -373,29 +459,8 @@ def split_oos(df, train=0.6, val=0.2):
     return df.iloc[:i1], df.iloc[i1:i2], df.iloc[i2:]
 
 
-def main():
-    import argparse
-    ap = argparse.ArgumentParser()
-    ap.add_argument('--mock', action='store_true')
-    ap.add_argument('--real-options', action='store_true')
-    ap.add_argument('--csv', default=None,
-                    help='Cached NIFTY FUT 3m CSV (date,open,high,low,close,volume)')
-    ap.add_argument('--opt-csv', default=None,
-                    help='Optional option-premium CSV (timestamp,strike,type,premium) for REAL premiums')
-    ap.add_argument('--targets', default='1.0,1.25,1.5,2.0,2.5,3.0')
-    args = ap.parse_args()
-    if not args.mock and not args.real_options and not args.csv:
-        args.mock = True  # safe default: never silently use real creds
-
-    src = 'CSV (cached)' if args.csv else ('REAL KITE DATA' if args.real_options else 'SYNTHETIC — NOT TRADEABLE')
-    print("\n" + "=" * 78)
-    print(f"ADVERSARIAL OPTIMIZATION HARNESS  [{src}]")
-    print("=" * 78)
-
-    df = load_data(args.mock, args.real_options, args.csv)
-    opt_lookup = build_opt_lookup(args.opt_csv) if args.opt_csv else None
-    if opt_lookup is not None:
-        print("✓ Real option premiums loaded from --opt-csv")
+def run_analysis(df, opt_lookup, targets='1.0,1.25,1.5,2.0,2.5,3.0'):
+    """Execute the full §12–§21 analysis on a prepared dataframe."""
     train, val, test = split_oos(df)
 
     # regime threshold learned ONLY from train (no future leak)
@@ -431,13 +496,13 @@ def main():
     # ---- §8 TARGET R sweep ----
     print("\n--- §8 TARGET R MULTIPLE (train) ---")
     print(f"{'R':>5}{'n':>4}{'win%':>7}{'tgt%':>7}{'sl%':>7}{'PF':>7}{'exp':>9}")
-    for R in [float(x) for x in args.targets.split(',')]:
+    for R in [float(x) for x in targets.split(',')]:
         tr = simulate(train, {**base, 'target_r': R, 'regime': False}, opt_lookup=opt_lookup)
         mt = metrics(tr)
         pf = f"{mt['pf']:.2f}" if np.isfinite(mt['pf']) else 'inf'
         print(f"{R:>5.2f}{mt['n']:>4}{mt['win']:>7.1f}{mt['target']:>7.1f}{mt['sl']:>7.1f}{pf:>7}{mt['exp']:>9.0f}")
 
-    # ---- §5 REGIME filter effect (best R from sweep above = 2.0 default) ----
+    # ---- §5 REGIME filter effect ----
     print("\n--- §5 REGIME NO-TRADE FILTER (train) ---")
     for regime in (False, True):
         tr = simulate(train, {**base, 'regime': regime}, opt_lookup=opt_lookup)
@@ -457,7 +522,7 @@ def main():
 
     # ---- §14 OUT-OF-SAMPLE + validation (untouched test) ----
     print("\n--- §14 OUT-OF-SAMPLE (untouched test split) ---")
-    best = {**base, 'regime': True}  # regime ON chosen for demonstration
+    best = {**base, 'regime': True}
     for name, split in (('TRAIN', train), ('VALID', val), ('TEST(OOS)', test)):
         tr = simulate(split, best, opt_lookup=opt_lookup)
         mt = metrics(tr)
@@ -476,6 +541,66 @@ def main():
               f"sl={mt['sl']:>5.1f}% PF={pf:>6} exp={mt['exp']:>7.0f} "
               f"dd={mt['dd']:>8.0f} avgW={mt['avg_w']:.0f} avgL={mt['avg_l']:.0f} "
               f"maxLossStreak={mt['max_loss_streak']}")
+
+
+def main():
+    import argparse
+    import os
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--mock', action='store_true')
+    ap.add_argument('--real-options', action='store_true')
+    ap.add_argument('--csv', default=None,
+                    help='Cached NIFTY FUT 3m CSV (date,open,high,low,close,volume)')
+    ap.add_argument('--opt-csv', default=None,
+                    help='Optional option-premium CSV (timestamp,strike,type,premium) for REAL premiums')
+    ap.add_argument('--targets', default='1.0,1.25,1.5,2.0,2.5,3.0')
+    ap.add_argument('--auto', action='store_true',
+                    help='AUTO: pull FUT + option history from Kite, write CSVs, then run analysis')
+    ap.add_argument('--export-csv', action='store_true',
+                    help='Only export fut.csv/opt.csv from Kite (no analysis)')
+    ap.add_argument('--export-start', default=config.BACKTEST_START_DATE)
+    ap.add_argument('--export-end', default=config.BACKTEST_END_DATE)
+    ap.add_argument('--export-out', default='.')
+    ap.add_argument('--export-band', type=int, default=5,
+                    help='Strikes each side of spot to export (×50 pts)')
+    args = ap.parse_args()
+
+    # --- automated export ---
+    if args.auto or args.export_csv:
+        try:
+            fut_p, opt_p = export_csv(args.export_start, args.export_end,
+                                     args.export_out, args.export_band)
+        except Exception as e:
+            print(f"❌ Export failed: {e}")
+            sys.exit(1)
+        if args.export_csv and not args.auto:
+            print("Export complete. Re-run WITHOUT --export-csv to analyze, or use --auto.")
+            return
+        # --auto: load what we just pulled and analyze
+        df = load_futures_csv(fut_p)
+        opt_lookup = build_opt_lookup(opt_p)
+        print("\n" + "=" * 78)
+        print("ADVERSARIAL OPTIMIZATION HARNESS  [AUTO — real Kite data]")
+        print("=" * 78)
+        run_analysis(df, opt_lookup, targets=args.targets)
+        print("\n" + "=" * 78)
+        print("✅ Auto run complete (real Kite history). Review OOS/validation stability.")
+        print("=" * 78)
+        return
+
+    if not args.mock and not args.real_options and not args.csv:
+        args.mock = True  # safe default: never silently use real creds
+
+    src = 'CSV (cached)' if args.csv else ('REAL KITE DATA' if args.real_options else 'SYNTHETIC — NOT TRADEABLE')
+    print("\n" + "=" * 78)
+    print(f"ADVERSARIAL OPTIMIZATION HARNESS  [{src}]")
+    print("=" * 78)
+
+    df = load_data(args.mock, args.real_options, args.csv)
+    opt_lookup = build_opt_lookup(args.opt_csv) if args.opt_csv else None
+    if opt_lookup is not None:
+        print("✓ Real option premiums loaded from --opt-csv")
+    run_analysis(df, opt_lookup, targets=args.targets)
 
     print("\n" + "=" * 78)
     if args.mock:
