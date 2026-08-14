@@ -433,6 +433,7 @@ def export_csv(start, end, out_dir='.', band=5):
 
     rows, total = [], len(tuesdays) * len(strikes) * 2
     done = 0
+    opt_errors = 0
     for expiry in tuesdays:
         for strike in strikes:
             for typ in ('CALL', 'PUT'):
@@ -444,6 +445,7 @@ def export_csv(start, end, out_dir='.', band=5):
                 try:
                     h = _hist_chunked(kite, tok, start, end, '3minute')
                 except Exception:
+                    opt_errors += 1
                     done += 1
                     continue
                 for c in h:
@@ -453,6 +455,26 @@ def export_csv(start, end, out_dir='.', band=5):
     od = pd.DataFrame(rows, columns=['timestamp', 'strike', 'type', 'premium'])
     od.to_csv(os.path.join(out_dir, 'opt.csv'), index=False, date_format='%Y-%m-%d %H:%M:%S')
     print(f"  ✓ opt.csv: {len(od)} rows  →  {out_dir}")
+
+    # Definitive diagnostic when no option premiums came back. An empty opt.csv
+    # means the harness falls back to Black-Scholes (model) premiums, so the
+    # win-rate is NOT tradeable. Tell the user exactly why.
+    if len(od) == 0:
+        try:
+            from kite_fetcher import check_option_historical_access
+            probe = check_option_historical_access()
+            if probe["subscribed"]:
+                print("  ⚠ opt.csv EMPTY despite a working option-API probe — "
+                      "check date range / strike band.")
+            else:
+                print("  ⚠⚠⚠  REAL OPTION DATA UNAVAILABLE  ⚠⚠⚠")
+                print(f"      reason : {probe['error']}")
+                print("      → Premiums will be BLACK-SCHOLES ESTIMATED (not real).")
+                print("      → For tradeable win-rates, enable the Kite")
+                print("        'Historical Data' add-on on your Zerodha account,")
+                print("        then re-run this workflow.")
+        except Exception as e:
+            print(f"  ⚠ opt.csv empty; option-API probe failed: {e}")
 
     # 15m futures for the HTF trend filter
     print("Exporting 15m FUT (HTF trend) …")

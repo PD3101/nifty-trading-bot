@@ -354,6 +354,44 @@ def fetch_spot_data(lookback_days=5):
         return None
 
 
+def check_option_historical_access():
+    """Probe whether this Kite account can fetch OPTION historical data.
+
+    Kite gates historical OPTION data behind a paid "Historical Data" add-on.
+    When it's NOT subscribed, ``historical_data`` on an option token either
+    returns an empty list or raises a permission/403 error. This probe resolves
+    one near-weekly NIFTY option and attempts a tiny historical fetch, then
+    returns a clear, machine-readable status so callers can tell the user
+    exactly what's missing.
+
+    Returns: dict {subscribed: bool, rows: int, token: int|None, error: str}
+    """
+    from datetime import datetime as _dt, timedelta as _td
+    try:
+        kite = get_kite_client()
+        fut = get_nearest_nifty_fut(kite)
+        # Pick a strike near the front futures price, current weekly expiry.
+        spot_proxy = float(fut.get('last_price') or 24000)
+        strike = int(round(spot_proxy / 50) * 50)
+        expiry = next_weekly_expiry()
+        sym, token = resolve_weekly_option(kite, expiry, strike, "CALL")
+        if not token:
+            return {"subscribed": False, "rows": 0, "token": None,
+                    "error": f"Could not resolve option {sym} (instrument missing)"}
+        to = datetime.now(IST)
+        frm = to - _td(days=2)
+        candles = kite.historical_data(
+            token, frm.strftime('%Y-%m-%d'), to.strftime('%Y-%m-%d'), '3minute')
+        if candles:
+            return {"subscribed": True, "rows": len(candles), "token": token, "error": ""}
+        return {"subscribed": False, "rows": 0, "token": token,
+                "error": "historical_data returned 0 rows for a valid option token "
+                         "(Kite Historical-Data add-on likely NOT subscribed)"}
+    except Exception as e:
+        return {"subscribed": False, "rows": 0, "token": None,
+                "error": f"{type(e).__name__}: {e}"}
+
+
 def refresh_token(api_key, api_secret):
     """
     Fully automated Kite token refresh using headless browser + TOTP.

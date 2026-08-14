@@ -554,6 +554,18 @@ def check_connectivity():
         print(f"❌ Option resolution check failed: {e}")
         return 1
 
+    # --- Real option historical-data subscription (drives tradeable win-rates) ---
+    try:
+        from kite_fetcher import check_option_historical_access
+        probe = check_option_historical_access()
+        if probe["subscribed"]:
+            print(f"📜 Option historical API: ✅ ACTIVE ({probe['rows']} rows in probe)")
+        else:
+            print(f"📜 Option historical API: ⚠️ NOT AVAILABLE — {probe['error']}")
+            print("   (win-rates will be Black-Scholes estimates until enabled)")
+    except Exception as e:
+        print(f"📜 Option historical API probe failed: {e}")
+
     print("✅ Connectivity + contract resolution OK")
     return 0
 
