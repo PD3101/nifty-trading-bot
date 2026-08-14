@@ -439,6 +439,15 @@ def export_csv(start, end, out_dir='.', band=5):
         cur += _td(days=1)
     if not tuesdays:
         tuesdays.append(sd)
+    # Always include the CURRENTLY-LIVE weekly expiry. Kite only serves
+    # historical premiums for the live/next contract (expired ones return 0
+    # rows), so a recent-window backtest must pull the live expiry to get REAL
+    # premiums. Without this, every past-week window yields an empty opt.csv.
+    from kite_fetcher import next_weekly_expiry
+    live_exp = next_weekly_expiry(ed)
+    if live_exp not in tuesdays:
+        tuesdays.append(live_exp)
+        print(f"  + live expiry {live_exp} included (real-premium source)")
 
     print("Loading NFO instruments (one call) …")
     insts = kite.instruments('NFO')
