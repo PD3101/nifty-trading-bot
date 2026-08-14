@@ -72,6 +72,15 @@ jobs:
           restore-keys: |
             nifty-state-
 
+      # Restore the accumulated real-option premium store (forward logger).
+      - name: Restore premium store
+        uses: actions/cache/restore@v4
+        with:
+          path: premiums.csv
+          key: nifty-premiums-latest
+          restore-keys: |
+            nifty-premiums-
+
       - name: Run bot check
         run: |
           if [ "${{ github.event.inputs.fetch_tradebook }}" == "true" ]; then
@@ -102,6 +111,24 @@ jobs:
             bot_state.json
             kite_credentials.json
           key: nifty-state-${{ github.run_id }}
+
+      # Persist the accumulated premium store (forward logger) for future backtests.
+      - name: Save premium store
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: premiums.csv
+          key: nifty-premiums-latest
+
+      # Upload the store as an artifact so it can be inspected/downloaded.
+      - name: Upload premium store artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: premiums-store
+          path: premiums.csv
+          if-no-files-found: ignore
+          retention-days: 90
 
       # Chain the next 5-minute scan via GitHub API, bypassing the unreliable
       # schedule cron. The schedule cron stays as a fallback bootstrap only.

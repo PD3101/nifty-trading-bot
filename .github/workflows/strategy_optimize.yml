@@ -55,12 +55,24 @@ jobs:
           restore-keys: |
             nifty-state-
 
+      # Restore the accumulated real-option premium store (forward logger).
+      - name: Restore premium store
+        uses: actions/cache/restore@v4
+        with:
+          path: premiums.csv
+          key: nifty-premiums-latest
+          restore-keys: |
+            nifty-premiums-
+
       - name: Run strategy optimization + notify
         run: |
           EXTRA=""
           if [ -n "${{ github.event.inputs.start }}" ]; then EXTRA="$EXTRA --export-start ${{ github.event.inputs.start }}"; fi
           if [ -n "${{ github.event.inputs.end }}" ]; then EXTRA="$EXTRA --export-end ${{ github.event.inputs.end }}"; fi
           if [ "${{ github.event.inputs.htf_off }}" = "true" ]; then EXTRA="$EXTRA --htf-off"; fi
+          # Use the forward-captured real premium store as the primary real
+          # premium source (gracefully falls back to the export's opt.csv).
+          EXTRA="$EXTRA --store premiums.csv"
           python strategy_optimizer.py --auto --notify $EXTRA
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -79,3 +91,11 @@ jobs:
         with:
           path: kite_credentials.json
           key: nifty-state-latest
+
+      # Persist the premium store for the next run.
+      - name: Save premium store
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: premiums.csv
+          key: nifty-premiums-latest

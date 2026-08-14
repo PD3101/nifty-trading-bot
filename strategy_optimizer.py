@@ -677,6 +677,8 @@ def main():
                     help='Post the analysis (§12–§21) to Telegram after running')
     ap.add_argument('--htf-off', action='store_true',
                     help='Disable the 15m HTF trend gate for this run (measures HTF lift)')
+    ap.add_argument('--store', default=None,
+                    help='Forward premium store CSV (premiums.csv) as the REAL premium source')
     args = ap.parse_args()
 
     # --htf-off: isolate the higher-timeframe filter's contribution by turning
@@ -699,6 +701,19 @@ def main():
         # --auto: load what we just pulled and analyze
         df = load_futures_csv(fut_p)
         opt_lookup = build_opt_lookup(opt_p)
+        # Forward store (if provided) takes precedence — it's the genuine
+        # accumulated real history, independent of Kite's expired-data gap.
+        if args.store:
+            try:
+                from premium_store import build_store_lookup
+                so = build_store_lookup(args.store)
+                if so is not None:
+                    opt_lookup = so
+                    print("✓ Real option premiums from --store (forward logger) override export")
+                else:
+                    print("⚠️  --store empty/unavailable; using exported opt.csv")
+            except Exception as e:
+                print(f"⚠️  --store load failed ({e}); using exported opt.csv")
         htf_df = load_futures_csv(fut15_p) if (fut15_p and os.path.exists(fut15_p)) else None
         print("\n" + "=" * 78)
         print("ADVERSARIAL OPTIMIZATION HARNESS  [AUTO — real Kite data]")
@@ -718,9 +733,19 @@ def main():
     print("=" * 78)
 
     df = load_data(args.mock, args.real_options, args.csv)
-    opt_lookup = build_opt_lookup(args.opt_csv) if args.opt_csv else None
-    if opt_lookup is not None:
-        print("✓ Real option premiums loaded from --opt-csv")
+    opt_lookup = None
+    if args.store:
+        try:
+            from premium_store import build_store_lookup
+            opt_lookup = build_store_lookup(args.store)
+            if opt_lookup is not None:
+                print("✓ Real option premiums loaded from --store (forward logger)")
+        except Exception as e:
+            print(f"⚠️  --store load failed ({e})")
+    if opt_lookup is None and args.opt_csv:
+        opt_lookup = build_opt_lookup(args.opt_csv)
+        if opt_lookup is not None:
+            print("✓ Real option premiums loaded from --opt-csv")
     run_and_notify(df, opt_lookup, args.targets, args.notify)
 
     print("\n" + "=" * 78)
