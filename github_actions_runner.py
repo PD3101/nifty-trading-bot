@@ -109,6 +109,7 @@ def load_state():
         'consecutive_failures': 0,
         'trades_today': 0,
         'losses_today': 0,
+        'daily_pnl': 0.0,
         'daily_stopped': False,
     }
     try:
@@ -305,6 +306,7 @@ def main():
             'consecutive_failures': 0,
             'trades_today': 0,
             'losses_today': 0,
+            'daily_pnl': 0.0,
             'daily_stopped': False,
         }
         if timing.is_weekday(now) and not timing.is_holiday(now):
@@ -442,19 +444,33 @@ def main():
         elif reason:
             send_full_exit_alert(notifier, position, current_price, reason, now)
             is_loss = current_price < position['entry_price']
+            realized_pnl = (current_price - position['entry_price']) * config.LOT_SIZE
             state['trades_today'] = state.get('trades_today', 0) + 1
+            state['daily_pnl'] = state.get('daily_pnl', 0.0) + realized_pnl
             if is_loss:
                 state['losses_today'] = state.get('losses_today', 0) + 1
             state['open_position'] = None
-            logger.info(f"EXIT ({reason}) | P&L {current_price - position['entry_price']:+.2f}")
+            logger.info(f"EXIT ({reason}) | P&L ₹{realized_pnl:+,.0f} | day ₹{state['daily_pnl']:+,.0f}")
 
             # Check if we should stop for the day
+            loss_cap_hit = state['daily_pnl'] <= -config.DAILY_LOSS_CAP_INR
             if (state['trades_today'] >= config.MAX_TRADES_PER_DAY or
-                    state['losses_today'] >= config.MAX_LOSSES_PER_DAY):
+                    state['losses_today'] >= config.MAX_LOSSES_PER_DAY or
+                    loss_cap_hit):
                 state['daily_stopped'] = True
-                send_daily_stop_alert(notifier, state['trades_today'],
-                                      state['losses_today'], now)
-                logger.info("Daily limit reached — trading stopped")
+                if loss_cap_hit:
+                    notifier.send_message(
+                        f"🛑 <b>DAILY LOSS CAP HIT</b>\n\n"
+                        f"📉 Realized loss today: ₹{state['daily_pnl']:,.0f}\n"
+                        f"🎯 Cap: ₹{config.DAILY_LOSS_CAP_INR:,.0f}\n"
+                        f"🛑 Trading stopped for the day."
+                        f"\n\n<i>{config.DISCLAIMER}</i>"
+                    )
+                    logger.info("Daily loss cap hit — trading stopped")
+                else:
+                    send_daily_stop_alert(notifier, state['trades_today'],
+                                          state['losses_today'], now)
+                    logger.info("Daily limit reached — trading stopped")
 
     # --- Flat → look for entry ---
     else:
