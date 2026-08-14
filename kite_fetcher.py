@@ -295,6 +295,65 @@ def fetch_15m_data(lookback_days=5):
         return None
 
 
+def _resolve_nifty_spot_token(kite):
+    """Resolve the NIFTY 50 index instrument token (for spot strike selection).
+
+    The NIFTY 50 index lives in the INDICES segment (not NFO). Its well-known
+    Kite token is 256265; we confirm from the instruments list when possible and
+    fall back to that constant otherwise.
+    """
+    try:
+        instruments = kite.instruments("NSE")
+        for i in instruments:
+            if i.get('segment') == 'INDICES' and i.get('tradingsymbol') == 'NIFTY 50':
+                return i['instrument_token']
+    except Exception as e:
+        logger.warning(f"NIFTY 50 index instrument lookup failed: {e}")
+    return 256265  # documented Kite token for the NIFTY 50 index
+
+
+def fetch_spot_data(lookback_days=5):
+    """Fetch NIFTY 50 SPOT index 3m candles (used for strike selection + timing).
+
+    Per the user's two-chart design, the SPOT index — not the futures close —
+    drives strike selection and entry timing, while the SL reference remains the
+    futures Supertrend level. Mirrors fetch_15m_data but for the INDICES segment.
+    """
+    try:
+        kite = get_kite_client()
+        token = _resolve_nifty_spot_token(kite)
+
+        to_date = datetime.now(IST)
+        from_date = to_date - timedelta(days=lookback_days)
+
+        candles = kite.historical_data(
+            instrument_token=token,
+            from_date=from_date.strftime('%Y-%m-%d'),
+            to_date=to_date.strftime('%Y-%m-%d'),
+            interval='3minute'
+        )
+
+        if not candles:
+            logger.error("No spot candle data returned from Kite")
+            return None
+
+        df = pd.DataFrame(candles)
+        df['date'] = pd.to_datetime(df['date'])
+        df.set_index('date', inplace=True)
+        df.index.name = None
+        df.columns = [c.lower() for c in df.columns]
+        if df.index.tz is None:
+            df.index = df.index.tz_localize('Asia/Kolkata')
+        else:
+            df.index = df.index.tz_convert('Asia/Kolkata')
+        df = df[['open', 'high', 'low', 'close', 'volume']]
+        logger.info(f"Fetched {len(df)} spot candles: {df.index[0]} to {df.index[-1]}")
+        return df
+    except Exception as e:
+        logger.error(f"Failed to fetch Kite spot data: {e}")
+        return None
+
+
 def refresh_token(api_key, api_secret):
     """
     Fully automated Kite token refresh using headless browser + TOTP.

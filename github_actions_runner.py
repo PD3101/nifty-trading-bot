@@ -96,6 +96,24 @@ def fetch_3m_data(lookback_days=5):
     return kite_fetch(lookback_days)
 
 
+def fetch_latest_spot():
+    """Latest NIFTY 50 SPOT index close (drives strike selection + timing).
+
+    Returns a float, or None if the spot fetch fails / disabled. When None, the
+    caller falls back to the futures close (intraday ~identical to spot).
+    """
+    if not config.SPOT_FOR_STRIKE:
+        return None
+    try:
+        from kite_fetcher import fetch_spot_data
+        df = fetch_spot_data(lookback_days=2)
+        if df is not None and len(df):
+            return float(df['close'].iloc[-1])
+    except Exception as e:
+        logger.warning(f"Spot fetch failed: {e}")
+    return None
+
+
 def keep_closed(df, period_minutes, now):
     """Keep only candles that have fully closed (non-repainting)."""
     close_at = df.index + pd.Timedelta(minutes=period_minutes)
@@ -349,11 +367,27 @@ def main():
 
         df3 = Indicators.add_all_indicators(df3, "3m")
         strategy = StrategyEngine()
+
+        # SPOT index series for strike selection (fallback to futures close).
+        spot_series = None
+        if config.SPOT_FOR_STRIKE:
+            try:
+                from kite_fetcher import fetch_spot_data
+                sdf = fetch_spot_data(lookback_days=2)
+                if sdf is not None and len(sdf):
+                    spot_series = pd.Series(sdf['close'].values, index=sdf.index)
+            except Exception as e:
+                logger.warning(f"Scan spot fetch failed: {e}")
+
         signals = []
 
         for i in range(20, len(df3)):
             row = df3.iloc[i]
             spot = float(row['close'])
+            if spot_series is not None:
+                sp = spot_series.asof(row.name)
+                if sp == sp and sp is not None:
+                    spot = float(sp)
             sig = strategy.generate_signal(row, df3, i, spot_price=spot)
             if sig:
                 signals.append({
@@ -424,7 +458,11 @@ def main():
     df3 = Indicators.add_all_indicators(df3, "3m")
     latest3 = df3.iloc[-1]
     current_idx = len(df3) - 1
-    spot = float(latest3['close'])
+    # Strike selection uses the NIFTY SPOT index (per the two-chart design);
+    # fall back to the futures close when spot fetch is disabled/unavailable.
+    spot = fetch_latest_spot()
+    if spot is None:
+        spot = float(latest3['close'])
     strategy = StrategyEngine()
 
     # 15m higher-timeframe trend bias (direction only) — gate entries to trend

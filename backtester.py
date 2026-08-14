@@ -192,8 +192,29 @@ class Backtester:
             print(f"  [htf] 15m fetch failed ({e}); HTF filter disabled")
             return None
 
+    def _load_spot(self, df_3m):
+        """NIFTY 50 SPOT index dataframe for strike selection + timing.
+
+        Per the user's two-chart design, strike selection is driven by the SPOT
+        index (not the futures close). When config.SPOT_FOR_STRIKE is False, or
+        when the spot fetch fails, this returns None and the futures close is
+        used as the spot proxy (they are ~identical intraday).
+        """
+        if not config.SPOT_FOR_STRIKE:
+            return None
+        if self.mock:
+            # Synthetic mock has no separate spot series; proxy with futures close.
+            return None
+        try:
+            from kite_fetcher import fetch_spot_data
+            return fetch_spot_data(lookback_days=5)
+        except Exception as e:
+            print(f"  [spot] spot fetch failed ({e}); using futures close as proxy")
+            return None
+
     # ----------------------------------------------------------------
-    def _run_on_df(self, df_3m, mult=None, vwma_len=None, real_options=None, htf_df=None):
+    def _run_on_df(self, df_3m, mult=None, vwma_len=None, real_options=None,
+                   htf_df=None, spot_df=None):
         if df_3m is None or len(df_3m) < 20:
             return None
         real_options = self.real_options if real_options is None else real_options
@@ -207,6 +228,12 @@ class Backtester:
             hst, hdir = Indicators.calculate_supertrend(
                 htf_df, config.SUPERTREND_PERIOD, config.SUPERTREND_MULTIPLIER)
             hdir_series = pd.Series(hdir, index=htf_df.index)
+
+        # NIFTY 50 SPOT index series — drives strike selection + timing. When
+        # absent (mock / fetch failed), the futures close is used as the proxy.
+        spot_series = None
+        if spot_df is not None and len(spot_df) >= 1:
+            spot_series = pd.Series(spot_df["close"].values, index=spot_df.index)
         if mult is not None:
             st, direction = Indicators.calculate_supertrend(df, config.SUPERTREND_PERIOD, mult)
             df["3m_supertrend"] = st
@@ -305,6 +332,10 @@ class Backtester:
                     continue
 
             spot = close
+            if spot_series is not None:
+                sp = spot_series.asof(t)
+                if sp == sp and sp is not None:   # not NaN
+                    spot = float(sp)
             htf_dir = None
             if hdir_series is not None:
                 v = hdir_series.asof(t)
@@ -422,7 +453,8 @@ class Backtester:
         print("=" * 80)
         df = self._load_df()
         htf = self._load_15m(df) if config.HTF_TREND_ENABLED else None
-        res = self._run_on_df(df, htf_df=htf)
+        spot = self._load_spot(df) if config.SPOT_FOR_STRIKE else None
+        res = self._run_on_df(df, htf_df=htf, spot_df=spot)
         if res is None or res["num_trades"] == 0:
             print("No trades executed.")
             return res

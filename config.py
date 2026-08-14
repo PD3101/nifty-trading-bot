@@ -73,6 +73,11 @@ HTF_TREND_ENABLED = True
 HTF_TIMEFRAME = "15m"
 HTF_USE = "FUT"               # trend read from 15m NIFTY FUT (not spot)
 
+# Strike selection uses the NIFTY SPOT index (not the futures close), per the
+# user's two-chart design (spot = strike selection + timing). When False, the
+# futures close is used as the spot proxy (they are ~identical intraday).
+SPOT_FOR_STRIKE = True
+
 # ============================================================================
 # ENTRY RULES
 # ============================================================================
