@@ -1,0 +1,75 @@
+name: nifty-strategy-optimize
+
+# Weekly adversarial strategy-optimization pass.
+# Pulls real NIFTY FUT + option history from Kite, runs the §12–§21 harness,
+# and posts the analysis (current vs V2, OOS) to Telegram.
+# Sunday 18:00 UTC = 23:30 IST (markets closed). Also runnable on demand.
+on:
+  schedule:
+    - cron: '0 18 * * 0'
+  workflow_dispatch:
+    inputs:
+      start:
+        description: 'Backtest/export start date (YYYY-MM-DD)'
+        required: false
+        default: ''
+      end:
+        description: 'Backtest/export end date (YYYY-MM-DD)'
+        required: false
+        default: ''
+
+concurrency:
+  group: nifty-strategy-optimize
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  optimize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install --quiet -r requirements.txt
+          python -m playwright install chromium --with-deps
+
+      # Restore the refreshed Kite access token so we don't re-login every run.
+      - name: Restore Kite token
+        uses: actions/cache/restore@v4
+        with:
+          path: kite_credentials.json
+          key: nifty-state-latest
+          restore-keys: |
+            nifty-state-
+
+      - name: Run strategy optimization + notify
+        run: |
+          EXTRA=""
+          if [ -n "${{ github.event.inputs.start }}" ]; then EXTRA="$EXTRA --export-start ${{ github.event.inputs.start }}"; fi
+          if [ -n "${{ github.event.inputs.end }}" ]; then EXTRA="$EXTRA --export-end ${{ github.event.inputs.end }}"; fi
+          python strategy_optimizer.py --auto --notify $EXTRA
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          KITE_API_KEY: ${{ secrets.KITE_API_KEY }}
+          KITE_API_SECRET: ${{ secrets.KITE_API_SECRET }}
+          KITE_CLIENT_ID: ${{ secrets.KITE_CLIENT_ID }}
+          KITE_PASSWORD: ${{ secrets.KITE_PASSWORD }}
+          KITE_TOTP_SECRET: ${{ secrets.KITE_TOTP_SECRET }}
+
+      # Save the (possibly refreshed) Kite token for next run.
+      - name: Save Kite token
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: kite_credentials.json
+          key: nifty-state-latest

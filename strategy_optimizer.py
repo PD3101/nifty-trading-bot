@@ -167,8 +167,11 @@ def simulate(df_3m, params, opt_lookup=None, engine=None):
     """
     engine = engine or StrategyEngine()
 
-    def get_prem(strike, opt, ts, spot_bs, T_i, iv_i):
-        if opt_lookup is not None:
+    def get_prem(strike, opt, ts, spot_bs, T_i, iv_i, real_ok=True):
+        # Real premiums are valid for ENTRY/EXIT (actual market LTP at that bar).
+        # For the SL we need the HYPOTHETICAL premium if the underlying were at
+        # the Supertrend level — that is a BS estimate, never a real quote.
+        if real_ok and opt_lookup is not None:
             rp = opt_lookup(strike, opt, ts)
             if rp is not None:
                 return rp
@@ -263,7 +266,7 @@ def simulate(df_3m, params, opt_lookup=None, engine=None):
         strike = engine.select_option_strike(close, sig)
         entry_prem = get_prem(strike, opt, t, close, T_i, iv_i)
         sl_level = sl_level_for(close, row, df, i, sig, params['sl'], atr_mult, swing_n)
-        sl_prem = get_prem(strike, opt, t, sl_level, T_i, iv_i)
+        sl_prem = get_prem(strike, opt, t, sl_level, T_i, iv_i, real_ok=False)
         risk = entry_prem - sl_prem
         if risk <= 0:
             continue
@@ -543,6 +546,33 @@ def run_analysis(df, opt_lookup, targets='1.0,1.25,1.5,2.0,2.5,3.0'):
               f"maxLossStreak={mt['max_loss_streak']}")
 
 
+def send_telegram(text):
+    """Post the analysis text to Telegram (chunked to fit message limits)."""
+    try:
+        from telegram_notifier import TelegramNotifier
+        n = TelegramNotifier()
+        if not n.enabled:
+            print("⚠️  Telegram not configured — skipping notify")
+            return
+        for i in range(0, len(text), 3800):
+            n.send_message(text[i:i + 3800])
+    except Exception as e:
+        print(f"⚠️  Telegram notify failed: {e}")
+
+
+def run_and_notify(df, opt_lookup, targets, notify):
+    """Run the analysis, print it, and optionally post to Telegram."""
+    import io
+    from contextlib import redirect_stdout
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        run_analysis(df, opt_lookup, targets=targets)
+    text = buf.getvalue()
+    print(text)
+    if notify:
+        send_telegram(text)
+
+
 def main():
     import argparse
     import os
@@ -563,6 +593,8 @@ def main():
     ap.add_argument('--export-out', default='.')
     ap.add_argument('--export-band', type=int, default=5,
                     help='Strikes each side of spot to export (×50 pts)')
+    ap.add_argument('--notify', action='store_true',
+                    help='Post the analysis (§12–§21) to Telegram after running')
     args = ap.parse_args()
 
     # --- automated export ---
@@ -582,7 +614,7 @@ def main():
         print("\n" + "=" * 78)
         print("ADVERSARIAL OPTIMIZATION HARNESS  [AUTO — real Kite data]")
         print("=" * 78)
-        run_analysis(df, opt_lookup, targets=args.targets)
+        run_and_notify(df, opt_lookup, args.targets, args.notify)
         print("\n" + "=" * 78)
         print("✅ Auto run complete (real Kite history). Review OOS/validation stability.")
         print("=" * 78)
@@ -600,7 +632,7 @@ def main():
     opt_lookup = build_opt_lookup(args.opt_csv) if args.opt_csv else None
     if opt_lookup is not None:
         print("✓ Real option premiums loaded from --opt-csv")
-    run_analysis(df, opt_lookup, targets=args.targets)
+    run_and_notify(df, opt_lookup, args.targets, args.notify)
 
     print("\n" + "=" * 78)
     if args.mock:
