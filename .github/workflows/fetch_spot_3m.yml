@@ -1,0 +1,74 @@
+name: fetch-spot-3m
+
+# Pull NIFTY 50 SPOT 3m history (chunked, Kite span <=100d) for backtesting.
+on:
+  workflow_dispatch:
+    inputs:
+      start:
+        description: 'Start date YYYY-MM-DD (earliest attempt)'
+        required: false
+        default: '2021-01-01'
+      end:
+        description: 'End date YYYY-MM-DD (default: today)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      - name: Install dependencies
+        run: |
+          pip install --quiet -r requirements.txt
+          python -m playwright install chromium --with-deps
+      - name: Restore Kite token
+        uses: actions/cache/restore@v4
+        with:
+          path: kite_credentials.json
+          key: nifty-state-latest
+          restore-keys: |
+            nifty-state-
+      - name: Ensure Kite credentials
+        run: |
+          if [ ! -f kite_credentials.json ]; then
+            cat > kite_credentials.json <<EOF
+          {
+            "api_key": "$KITE_API_KEY",
+            "api_secret": "$KITE_API_SECRET",
+            "access_token": "$KITE_ACCESS_TOKEN"
+          }
+          EOF
+          fi
+        env:
+          KITE_API_KEY: ${{ secrets.KITE_API_KEY }}
+          KITE_API_SECRET: ${{ secrets.KITE_API_SECRET }}
+          KITE_ACCESS_TOKEN: ${{ secrets.KITE_ACCESS_TOKEN }}
+      - name: Fetch SPOT 3m
+        run: |
+          END=""
+          if [ -n "${{ github.event.inputs.end }}" ]; then END="--end ${{ github.event.inputs.end }}"; fi
+          python fetch_spot_3m.py --start ${{ github.event.inputs.start }} $END --out spot_3m.csv
+        env:
+          KITE_API_KEY: ${{ secrets.KITE_API_KEY }}
+          KITE_API_SECRET: ${{ secrets.KITE_API_SECRET }}
+          KITE_ACCESS_TOKEN: ${{ secrets.KITE_ACCESS_TOKEN }}
+          KITE_CLIENT_ID: ${{ secrets.KITE_CLIENT_ID }}
+          KITE_PASSWORD: ${{ secrets.KITE_PASSWORD }}
+          KITE_TOTP_SECRET: ${{ secrets.KITE_TOTP_SECRET }}
+      - name: Upload CSV
+        uses: actions/upload-artifact@v4
+        with:
+          name: spot-3m
+          path: spot_3m.csv
+          if-no-files-found: error
+          retention-days: 90
