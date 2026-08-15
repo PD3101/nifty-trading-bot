@@ -165,7 +165,7 @@ class StrategyEngine:
         st, direction = Indicators.calculate_supertrend(
             df_15m, config.SUPERTREND_PERIOD, config.SUPERTREND_MULTIPLIER)
         dir_series = pd.Series(direction, index=df_15m.index)
-        val = dir_series.asof(t)
+        val = dir_series.sort_index().asof(t)
         if val == 1:
             return 'up'
         if val == -1:

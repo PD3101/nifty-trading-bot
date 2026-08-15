@@ -111,7 +111,7 @@ def build_opt_lookup(path):
         s = lookup.get((int(strike), opt.upper()))
         if s is None or len(s) == 0:
             return None
-        v = s.asof(ts)
+        v = s.sort_index().asof(ts)
         return float(v) if v == v else None
     return premium
 
@@ -286,7 +286,7 @@ def simulate(df_3m, params, opt_lookup=None, htf_df=None, engine=None):
 
         # Higher-timeframe trend gate (only trade with the 15m bias)
         if config.HTF_TREND_ENABLED and hdir_series is not None:
-            hv = hdir_series.asof(t)
+            hv = hdir_series.sort_index().asof(t)
             htf_dir = 'up' if hv == 1 else ('down' if hv == -1 else None)
             if sig == 'BUY_CALL' and htf_dir != 'up':
                 continue

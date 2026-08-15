@@ -280,15 +280,29 @@ def fetch_option_history(kite, instrument_token, from_date, to_date, interval='3
 def quote_option_ltp(kite, instrument_token):
     """Live last-price (LTP) for an option instrument via Kite quote API.
 
-    Returns a float premium, or None if the quote fails. Falls back to the
-    Black-Scholes estimate in the runner when None.
+    Returns a float premium, or None. Tries the fast LTP quote first, then
+    falls back to intraday historical_data (proven to work for the live expiry
+    even when quote returns empty), then None so the runner can BS-estimate.
     """
     try:
         q = kite.quote([f"NFO:{instrument_token}"])
         return float(q[f"NFO:{instrument_token}"]["last_price"])
+    except Exception:
+        pass
+    try:
+        from datetime import datetime as _dt
+        to = _dt.now(IST)
+        frm = to.replace(hour=9, minute=15, second=0, microsecond=0)
+        candles = kite.historical_data(
+            instrument_token=instrument_token,
+            from_date=frm.strftime('%Y-%m-%d %H:%M'),
+            to_date=to.strftime('%Y-%m-%d %H:%M'),
+            interval='minute')
+        if candles:
+            return float(pd.DataFrame(candles)['close'].iloc[-1])
     except Exception as e:
-        logger.warning(f"Option LTP quote failed (token={instrument_token}): {e}")
-        return None
+        logger.warning(f"Option LTP historical fallback failed (token={instrument_token}): {e}")
+    return None
 
 
 def fetch_15m_data(lookback_days=5):

@@ -423,7 +423,7 @@ def main():
             row = df3.iloc[i]
             spot = float(row['close'])
             if spot_series is not None:
-                sp = spot_series.asof(row.name)
+                sp = spot_series.sort_index().asof(row.name)
                 if sp == sp and sp is not None:
                     spot = float(sp)
             sig = strategy.generate_signal(row, df3, i, spot_price=spot)

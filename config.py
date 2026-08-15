@@ -150,7 +150,7 @@ EXPIRY_DAY = 1                # Tuesday — NIFTY 50 weekly options expiry (user
 # When True and not --mock, the backtester prices trades from actual option
 # historical premiums instead of the Black-Scholes proxy. Falls back to BS if
 # a premium is missing for a timestamp.
-REAL_OPTION_DATA = False
+REAL_OPTION_DATA = True
 
 # Hardening: stop trading for the day once realized losses hit this rupee cap.
 DAILY_LOSS_CAP_INR = 25000    # ₹ — daily drawdown guard (beyond the per-loss-count stop)

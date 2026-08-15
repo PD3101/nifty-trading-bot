@@ -71,6 +71,27 @@ def _resolve_band_tokens(kite, expiry, center_strike, band):
     return out
 
 
+def _latest_premium_via_history(kite, token, now_ist):
+    """Real last premium from intraday historical data (proven Kite endpoint).
+
+    Used as a fallback when kite.quote returns empty — which it does on
+    holidays and has been observed empty on trading days too. Returns float
+    or None. Uses naive IST wall-clock so Kite parses the window correctly.
+    """
+    try:
+        frm = now_ist.replace(hour=9, minute=15, second=0, microsecond=0)
+        frm = frm.replace(tzinfo=None)
+        to = now_ist.replace(tzinfo=None)
+        candles = kite.historical_data(
+            instrument_token=token, from_date=frm, to_date=to, interval='minute')
+        if not candles:
+            return None
+        return float(pd.DataFrame(candles)['close'].iloc[-1])
+    except Exception as e:
+        logger.warning(f"premium_store: historical fallback failed (tok={token}): {e}")
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
@@ -96,41 +117,33 @@ def log_live_premiums(kite, center_strike, expiry=None, band=DEFAULT_BAND,
             from kite_fetcher import next_weekly_expiry
             exp_s = next_weekly_expiry().isoformat()
 
-        q = kite.quote([f"NFO:{t}" for _, _, t in tokens])
-        if not q:
-            # Diagnostic probe: isolate "market closed / holiday" vs "bulk quote
-            # broken". Try a single resolved option token and a futures token.
-            probe = {}
-            try:
-                s_tok = tokens[0][2]
-                sq = kite.quote([f"NFO:{s_tok}"])
-                probe['single_option'] = (len(sq), str(sq)[:160])
-            except Exception as e:
-                probe['single_option'] = f"ERR {e}"
-            try:
-                from kite_fetcher import get_nearest_nifty_fut
-                fut = get_nearest_nifty_fut(kite)
-                fq = kite.quote([f"NFO:{fut['instrument_token']}"])
-                probe['futures'] = (len(fq), str(fq)[:160])
-            except Exception as e:
-                probe['futures'] = f"ERR {e}"
-            logger.warning(f"premium_store: kite.quote empty for {len(tokens)} "
-                           f"tokens. probe={probe}")
-            return 0
         ts = ts or datetime.now(pytz.timezone(IST))
         if ts.tzinfo is None:
             import pytz
             ts = pytz.timezone(IST).localize(ts)
 
+        # Primary: fast bulk LTP quote. Fallback: intraday historical_data
+        # (proven to work for the live expiry even when quote returns empty).
         rows = []
-        for strike, typ, tok in tokens:
-            rec = q.get(f"NFO:{tok}")
-            if not rec:
-                continue
-            ltp = rec.get('last_price')
-            if ltp is None or ltp != ltp:
-                continue
-            rows.append((ts, exp_s, int(strike), typ, float(ltp)))
+        q = {}
+        try:
+            q = kite.quote([f"NFO:{t}" for _, _, t in tokens])
+        except Exception as e:
+            logger.warning(f"premium_store: kite.quote error: {e}")
+        if q:
+            for strike, typ, tok in tokens:
+                rec = q.get(f"NFO:{tok}")
+                if rec and rec.get('last_price') is not None:
+                    rows.append((ts, exp_s, int(strike), typ, float(rec['last_price'])))
+        if not rows:
+            logger.info(f"premium_store: quote empty/unusable for {len(tokens)} "
+                        f"tokens; falling back to historical_data")
+            import time
+            for strike, typ, tok in tokens:
+                p = _latest_premium_via_history(kite, tok, ts)
+                if p is not None:
+                    rows.append((ts, exp_s, int(strike), typ, p))
+                time.sleep(0.05)  # avoid Kite historical rate limits
 
         if not rows:
             return 0
@@ -187,7 +200,7 @@ def build_store_lookup(path=DEFAULT_PATH, expiry=None):
         s = lookup.get((int(strike), opt.upper()))
         if s is None or len(s) == 0:
             return None
-        v = s.asof(ts)
+        v = s.sort_index().asof(ts)
         return float(v) if v == v else None
     return premium
 

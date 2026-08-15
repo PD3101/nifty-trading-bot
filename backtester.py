@@ -151,7 +151,7 @@ class Backtester:
             expiry = self._next_expiry(ts.date())
             series = self._resolve_option_series(opt_type, strike, expiry)
             if series is not None and len(series):
-                val = series['premium'].asof(ts)
+                val = series['premium'].sort_index().asof(ts)
                 if val == val and val is not None:   # not NaN
                     return float(val)
         return price_option(spot, strike, T_i, iv_i, opt_type)
@@ -334,12 +334,12 @@ class Backtester:
 
             spot = close
             if spot_series is not None:
-                sp = spot_series.asof(t)
+                sp = spot_series.sort_index().asof(t)
                 if sp == sp and sp is not None:   # not NaN
                     spot = float(sp)
             htf_dir = None
             if hdir_series is not None:
-                v = hdir_series.asof(t)
+                v = hdir_series.sort_index().asof(t)
                 htf_dir = 'up' if v == 1 else ('down' if v == -1 else None)
             signal = self.strategy.generate_signal(row, df, i, spot_price=spot, htf_dir=htf_dir)
             if not signal:

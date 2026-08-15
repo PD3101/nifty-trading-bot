@@ -143,3 +143,16 @@ jobs:
         run: python chain_next_run.py
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Prune old per-run state caches (keep 5 most recent) to avoid cache
+      # sprawl / eviction pressure. nifty-state-latest is always in the newest.
+      - name: Prune old state caches
+        if: always()
+        run: |
+          gh cache list --repo "$GITHUB_REPOSITORY" --key nifty-state- --limit 100 \
+            | sort -k4 | head -n -5 | awk '{print $1}' | while read id; do
+              gh cache delete "$id" --repo "$GITHUB_REPOSITORY" || true
+            done
+          echo "Remaining nifty-state caches:"; gh cache list --repo "$GITHUB_REPOSITORY" --key nifty-state- --limit 100 | wc -l
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

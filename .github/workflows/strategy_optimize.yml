@@ -28,6 +28,7 @@ concurrency:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   optimize:
@@ -63,6 +64,28 @@ jobs:
           key: nifty-premiums-latest
           restore-keys: |
             nifty-premiums-
+
+      - name: Ensure Kite credentials
+        # The cache restore above may miss (permissions/cache eviction). Rather
+        # than depend on it, materialize kite_credentials.json from the repo
+        # secrets so load_credentials always finds a valid api_key/secret.
+        run: |
+          if [ ! -f kite_credentials.json ]; then
+            cat > kite_credentials.json <<EOF
+          {
+            "api_key": "$KITE_API_KEY",
+            "api_secret": "$KITE_API_SECRET",
+            "access_token": "$KITE_ACCESS_TOKEN"
+          }
+          EOF
+            echo "Wrote kite_credentials.json from secrets"
+          else
+            echo "kite_credentials.json present from cache"
+          fi
+        env:
+          KITE_API_KEY: ${{ secrets.KITE_API_KEY }}
+          KITE_API_SECRET: ${{ secrets.KITE_API_SECRET }}
+          KITE_ACCESS_TOKEN: ${{ secrets.KITE_ACCESS_TOKEN }}
 
       - name: Run strategy optimization + notify
         run: |
