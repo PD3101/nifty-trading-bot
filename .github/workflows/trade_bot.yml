@@ -32,6 +32,11 @@ on:
         required: false
         default: false
         type: boolean
+      log_premiums:
+        description: 'Force real-option premium capture now (bypass trading-hours gate; for diagnostics/backfill)'
+        required: false
+        default: false
+        type: boolean
 
 # Never run two checks at once (protects bot_state.json from races).
 concurrency:
@@ -101,6 +106,7 @@ jobs:
           KITE_TOTP_SECRET: ${{ secrets.KITE_TOTP_SECRET }}
           GH_ACTION_TEST: ${{ github.event.inputs.test == 'true' }}
           SCAN_TODAY: ${{ github.event.inputs.scan_today == 'true' }}
+          FORCE_PREMIUM_LOG: ${{ github.event.inputs.log_premiums == 'true' }}
 
       # Persist state for the next run (unique key each run; restore matches by prefix).
       - name: Save bot state

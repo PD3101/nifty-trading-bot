@@ -115,27 +115,33 @@ def fetch_latest_spot():
     return None
 
 
-def maybe_log_premiums(now, timing):
+def maybe_log_premiums(now, timing, force=False):
     """Capture real option LTPs every market-hours run into the forward store.
 
     Runs independently of entry/exit logic so we accumulate a genuine, growing
     real-premium history (Kite won't serve expired-contract history on demand).
-    No-op outside market hours / on holidays / in test or scan mode.
+    No-op outside market hours / on holidays / in test or scan mode, unless
+    `force=True` (used for diagnostics / manual backfill — bypasses the
+    trading-day gate but still performs the real Kite fetch).
     """
     try:
-        if not (timing.is_weekday(now) and not timing.is_holiday(now)):
+        trading_day = timing.is_weekday(now) and not timing.is_holiday(now)
+        can_trade = timing.can_trade_now()
+        if not (trading_day and can_trade) and not force:
+            logger.info(f"premium logging skipped: trading_day={trading_day}, "
+                        f"can_trade_now={can_trade}, force={force}")
             return
-        if not timing.can_trade_now():
-            return
+        logger.info(f"premium logging: trading_day={trading_day}, "
+                    f"can_trade_now={can_trade}, force={force}")
         from kite_fetcher import get_kite_client, fetch_3m_data
         kite = get_kite_client()
         df = fetch_3m_data(lookback_days=1)
         if df is None or len(df) == 0:
+            logger.warning("premium logging: no FUT data to derive center strike")
             return
         center = float(df['close'].iloc[-1])
         n = log_live_premiums(kite, center)
-        if n:
-            logger.info(store_summary())
+        logger.info(f"premium logging: wrote {n} rows — {store_summary()}")
     except Exception as e:
         logger.warning(f"premium logging skipped: {e}")
 
@@ -339,6 +345,12 @@ def main():
 
     state = load_state()
 
+    # --- Forward real-premium capture (every run; self-gated by market hours
+    # unless FORCE_PREMIUM_LOG is set). Placed BEFORE the non-trading-day idle
+    # return so it can run for diagnostics/backfill even on a holiday. ---
+    maybe_log_premiums(now, timing,
+                       force=os.getenv('FORCE_PREMIUM_LOG', '').lower() in ('1', 'true'))
+
     # --- Daily reset: reset daily counters but KEEP any open position so it
     # gets settled by the exit logic below (no-carry-forward rule — every
     # trade must close intraday). ---
@@ -372,11 +384,6 @@ def main():
         logger.info("Non-trading day and no open position — idle")
         save_state(state)
         return
-
-    # --- Forward real-premium capture (every market-hours run) ---
-    # Accumulates a genuine real-option LTP history for future backtests,
-    # since Kite won't serve expired-contract premiums on demand.
-    maybe_log_premiums(now, timing)
 
     # --- Scan-only mode: fetch today's data and report signals ---
     if os.getenv('SCAN_TODAY', '').lower() in ('1', 'true'):

@@ -88,6 +88,8 @@ def log_live_premiums(kite, center_strike, expiry=None, band=DEFAULT_BAND,
         if not tokens:
             logger.warning("premium_store: no option tokens resolved; skipping log")
             return 0
+        logger.info(f"premium_store: resolved {len(tokens)} option tokens "
+                    f"(center={center_strike}, band={band})")
         exp_s = (expiry.isoformat() if hasattr(expiry, 'isoformat') else str(expiry)
                  if expiry else None)
         if exp_s is None:
@@ -96,6 +98,8 @@ def log_live_premiums(kite, center_strike, expiry=None, band=DEFAULT_BAND,
 
         q = kite.quote([f"NFO:{t}" for _, _, t in tokens])
         if not q:
+            logger.warning("premium_store: kite.quote returned empty for "
+                           f"{len(tokens)} tokens; skipping log")
             return 0
         ts = ts or datetime.now(pytz.timezone(IST))
         if ts.tzinfo is None:
