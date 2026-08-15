@@ -98,8 +98,24 @@ def log_live_premiums(kite, center_strike, expiry=None, band=DEFAULT_BAND,
 
         q = kite.quote([f"NFO:{t}" for _, _, t in tokens])
         if not q:
-            logger.warning("premium_store: kite.quote returned empty for "
-                           f"{len(tokens)} tokens; skipping log")
+            # Diagnostic probe: isolate "market closed / holiday" vs "bulk quote
+            # broken". Try a single resolved option token and a futures token.
+            probe = {}
+            try:
+                s_tok = tokens[0][2]
+                sq = kite.quote([f"NFO:{s_tok}"])
+                probe['single_option'] = (len(sq), str(sq)[:160])
+            except Exception as e:
+                probe['single_option'] = f"ERR {e}"
+            try:
+                from kite_fetcher import get_nearest_nifty_fut
+                fut = get_nearest_nifty_fut(kite)
+                fq = kite.quote([f"NFO:{fut['instrument_token']}"])
+                probe['futures'] = (len(fq), str(fq)[:160])
+            except Exception as e:
+                probe['futures'] = f"ERR {e}"
+            logger.warning(f"premium_store: kite.quote empty for {len(tokens)} "
+                           f"tokens. probe={probe}")
             return 0
         ts = ts or datetime.now(pytz.timezone(IST))
         if ts.tzinfo is None:
