@@ -1,0 +1,55 @@
+name: data-probe
+
+# One-off: probe NIFTY SPOT 3m history depth from Kite (backtest data planning).
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      - name: Install dependencies
+        run: |
+          pip install --quiet -r requirements.txt
+          python -m playwright install chromium --with-deps
+      - name: Restore Kite token
+        uses: actions/cache/restore@v4
+        with:
+          path: kite_credentials.json
+          key: nifty-state-latest
+          restore-keys: |
+            nifty-state-
+      - name: Ensure Kite credentials
+        run: |
+          if [ ! -f kite_credentials.json ]; then
+            cat > kite_credentials.json <<EOF
+          {
+            "api_key": "$KITE_API_KEY",
+            "api_secret": "$KITE_API_SECRET",
+            "access_token": "$KITE_ACCESS_TOKEN"
+          }
+          EOF
+          fi
+        env:
+          KITE_API_KEY: ${{ secrets.KITE_API_KEY }}
+          KITE_API_SECRET: ${{ secrets.KITE_API_SECRET }}
+          KITE_ACCESS_TOKEN: ${{ secrets.KITE_ACCESS_TOKEN }}
+      - name: Run probe
+        run: python data_probe.py
+        env:
+          KITE_API_KEY: ${{ secrets.KITE_API_KEY }}
+          KITE_API_SECRET: ${{ secrets.KITE_API_SECRET }}
+          KITE_ACCESS_TOKEN: ${{ secrets.KITE_ACCESS_TOKEN }}
+          KITE_CLIENT_ID: ${{ secrets.KITE_CLIENT_ID }}
+          KITE_PASSWORD: ${{ secrets.KITE_PASSWORD }}
+          KITE_TOTP_SECRET: ${{ secrets.KITE_TOTP_SECRET }}
