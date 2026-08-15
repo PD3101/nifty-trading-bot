@@ -119,7 +119,6 @@ def log_live_premiums(kite, center_strike, expiry=None, band=DEFAULT_BAND,
 
         ts = ts or datetime.now(pytz.timezone(IST))
         if ts.tzinfo is None:
-            import pytz
             ts = pytz.timezone(IST).localize(ts)
 
         # Primary: fast bulk LTP quote. Fallback: intraday historical_data
